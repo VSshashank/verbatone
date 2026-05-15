@@ -49,78 +49,113 @@ def _normalize_token(value):
 
 def _assign_lyrics_to_segments(segments, lyrics_text):
     """
-    Map the provided lyrics text to Whisper's transcribed segments using a global
-    SequenceMatcher alignment. This completely eliminates dropped lines and ensures
-    100% of the lyrics are distributed across the available time segments, providing
-    flawless boundaries for the CTC forced alignment model.
+    Map lyrics text to Whisper segments using TIME-PROPORTIONAL allocation.
+
+    WHY NOT SEQUENCEMATCHER:
+    Songs with repeated sections (chorus 1 == chorus 2 text) cause
+    SequenceMatcher to map BOTH occurrences to the SAME Whisper segment,
+    compressing the second chorus to near-zero duration. This is the root
+    cause of the "second chorus rushes through in half the time" bug.
+
+    FIX: allocate lyric words proportionally to each segment's time DURATION.
+    Duration is always monotonically increasing, so chorus 2 always gets its
+    own proportional word budget regardless of text repetition.
     """
+    import logging
+    log = logging.getLogger("whisperx_runner")
+
     if not lyrics_text or not segments:
         return segments
 
-    # Extract clean lyric words
-    lines = [line.strip() for line in lyrics_text.splitlines() if line.strip() and not line.lower().startswith(("embed", "[", "you might also like"))]
+    # Extract clean lyric words — skip section labels like [Chorus]
     lyric_words = []
-    for line in lines:
+    for line in lyrics_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower().startswith(("embed", "you might also like")):
+            continue
+        if re.fullmatch(r"\[.*?\]", line):
+            continue  # skip section markers entirely from injection
         line = re.sub(r"\d*embed$", "", line, flags=re.IGNORECASE).strip()
         lyric_words.extend(re.findall(r"\S+", line))
 
     if not lyric_words:
         return segments
 
-    lyric_tokens = [_normalize_token(w) for w in lyric_words]
-    
-    # Flatten all transcript tokens to create a global sequence
-    transcript_tokens = []
-    seg_token_ranges = []
+    total_lyric_words = len(lyric_words)
+
+    # Compute each segment's time duration and transcript word count
+    seg_info = []
     for seg in segments:
-        tokens = [_normalize_token(w) for w in re.findall(r"\S+", seg.get("text", ""))]
-        tokens = [t for t in tokens if t]
-        
-        start_idx = len(transcript_tokens)
-        transcript_tokens.extend(tokens)
-        end_idx = len(transcript_tokens)
-        
-        seg_token_ranges.append((start_idx, end_idx))
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", start))
+        duration = max(end - start, 0.0)
+        tok_count = len([t for t in re.findall(r"\S+", seg.get("text", "")) if _normalize_token(t)])
+        seg_info.append({"seg": seg, "duration": duration, "tok_count": tok_count})
 
-    # Global sequence match to map every transcript word boundary to a lyric word boundary
-    matcher = SequenceMatcher(None, transcript_tokens, lyric_tokens, autojunk=False)
-    
-    t2l = [0] * (len(transcript_tokens) + 1)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal" or tag == "replace":
-            for i in range(i1, i2):
-                proportion = (i - i1) / max(1, i2 - i1)
-                t2l[i] = j1 + int(proportion * (j2 - j1))
-            t2l[i2] = j2
-        elif tag == "delete":
-            for i in range(i1, i2):
-                t2l[i] = j1
-            t2l[i2] = j2
-        elif tag == "insert":
-            t2l[i1] = j2
+    total_duration = sum(s["duration"] for s in seg_info) or 1.0
+    total_tok = sum(s["tok_count"] for s in seg_info) or 1
 
-    # Distribute lyric words to segments based on the mapped boundaries
-    lyric_cursor = 0
+    # Allocate words: 70% weight on duration (monotonic, safe for repeats)
+    #                 30% weight on transcript density (handles silence gaps)
+    raw_alloc = []
+    for s in seg_info:
+        dur_weight = s["duration"] / total_duration
+        tok_weight = s["tok_count"] / total_tok
+        weight = 0.7 * dur_weight + 0.3 * tok_weight
+        raw_alloc.append(weight * total_lyric_words)
+
+    # Round to integers while preserving total
+    int_alloc = []
+    remainder = 0.0
+    for r in raw_alloc:
+        frac = r + remainder
+        n = int(frac)
+        remainder = frac - n
+        int_alloc.append(n)
+
+    # Distribute leftover words to the longest segments first
+    leftover = total_lyric_words - sum(int_alloc)
+    if leftover > 0:
+        order = sorted(range(len(int_alloc)), key=lambda i: seg_info[i]["duration"], reverse=True)
+        for i in order[:leftover]:
+            int_alloc[i] += 1
+
+    # Ensure no text-bearing segment receives 0 words
+    for i, s in enumerate(seg_info):
+        if s["tok_count"] > 0 and int_alloc[i] == 0 and total_lyric_words > len(seg_info):
+            donor = max(range(len(int_alloc)), key=lambda j: int_alloc[j] if j != i else -1)
+            if int_alloc[donor] > 1:
+                int_alloc[donor] -= 1
+                int_alloc[i] = 1
+
+    log.info(
+        "_assign_lyrics_to_segments: %d lyric words across %d segments  alloc=%s",
+        total_lyric_words, len(segments), int_alloc,
+    )
+
+    # Build new segments
+    cursor = 0
     new_segments = []
-    
-    for k, seg in enumerate(segments):
-        start_t, end_t = seg_token_ranges[k]
-        lyric_end = t2l[end_t]
-        
-        # Ensure monotonic bounds
-        lyric_end = max(lyric_cursor, lyric_end)
-        
-        # The last segment acts as a catch-all for any remaining lyrics
-        if k == len(segments) - 1:
-            lyric_end = len(lyric_words)
-            
-        chunk_words = lyric_words[lyric_cursor:lyric_end]
-        if chunk_words:
-            new_seg = dict(seg)
-            new_seg["text"] = " ".join(chunk_words)
+    for i, s in enumerate(seg_info):
+        count = int_alloc[i]
+        chunk = lyric_words[cursor:cursor + count]
+        if chunk:
+            new_seg = dict(s["seg"])
+            new_seg["text"] = " ".join(chunk)
             new_segments.append(new_seg)
-            
-        lyric_cursor = lyric_end
+        cursor += count
+
+    # Safety: if any words remain, append to last segment
+    if cursor < total_lyric_words:
+        remaining = lyric_words[cursor:]
+        if new_segments:
+            new_segments[-1]["text"] = new_segments[-1]["text"] + " " + " ".join(remaining)
+        else:
+            last = dict(segments[-1])
+            last["text"] = " ".join(remaining)
+            new_segments.append(last)
 
     return new_segments
 
