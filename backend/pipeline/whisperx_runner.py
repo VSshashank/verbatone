@@ -71,19 +71,39 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
             "Install them with: pip install whisperx torch"
         ) from exc
 
+    import logging
+    log = logging.getLogger("whisperx_runner")
+    logging.basicConfig(level=logging.INFO)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
 
+    log.info("Loading Whisper model=%s device=%s", model_size, device)
     model = whisperx.load_model(model_size, device, compute_type=compute_type)
 
     # Pattern C: prefer vocals stem for alignment if available
     align_source = audio_path
     if vocals_path and os.path.exists(vocals_path):
         align_source = vocals_path
+        log.info("Using vocals stem for alignment: %s", vocals_path)
+    else:
+        log.info("Using full mix for alignment: %s", audio_path)
 
     audio = whisperx.load_audio(align_source)
     result = model.transcribe(audio, language=language)
     language_code = language or result.get("language") or "en"
+
+    raw_segments = result.get("segments", [])
+    log.info(
+        "Transcription complete: %d segments detected, language=%s",
+        len(raw_segments), language_code,
+    )
+    for i, seg in enumerate(raw_segments[:10]):
+        log.info(
+            "  Seg %d  [%.1fs - %.1fs]  %s",
+            i, seg.get("start", 0), seg.get("end", 0),
+            str(seg.get("text", ""))[:80],
+        )
 
     # Pattern A: expand segment coverage to full audio duration
     audio_duration = _get_audio_duration(audio_path)
