@@ -8,6 +8,28 @@ function timeToSeconds(value) {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
+function findActiveWordIndex(words, currentTime) {
+  if (!words.length) return -1;
+
+  const exactIndex = words.findIndex(
+    (word) => currentTime >= word.start && currentTime <= word.end,
+  );
+  if (exactIndex >= 0) return exactIndex;
+
+  if (currentTime < words[0].start) return -1;
+
+  for (let index = 0; index < words.length - 1; index += 1) {
+    const word = words[index];
+    const next = words[index + 1];
+    if (currentTime > word.end && currentTime < next.start) {
+      return word.lineIndex === next.lineIndex ? index : -1;
+    }
+  }
+
+  const lastWord = words[words.length - 1];
+  return currentTime > lastWord.end && currentTime - lastWord.end <= 0.75 ? words.length - 1 : -1;
+}
+
 export function useTTML(ttmlString, currentTime) {
   const [lines, setLines] = useState([]);
 
@@ -67,9 +89,7 @@ export function useTTML(ttmlString, currentTime) {
   }, [ttmlString]);
 
   const words = useMemo(() => lines.flatMap((line) => line.words), [lines]);
-  const activeIdx = words.findIndex(
-    (word) => currentTime >= word.start && currentTime <= word.end,
-  );
+  const activeIdx = findActiveWordIndex(words, currentTime);
   const activeWord = activeIdx >= 0 ? words[activeIdx] : null;
   const activeLine = lines.find(
     (line) => line.kind === "lyric" && currentTime >= line.start && currentTime <= line.end,

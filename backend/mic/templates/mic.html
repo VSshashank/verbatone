@@ -39,6 +39,17 @@
       }
       #start { background: #14b8a6; }
       #stop { background: #ef4444; display: none; }
+      #fallback { display: none; width: 100%; }
+      #fallback label {
+        background: #27272a;
+        border: 1px solid #3f3f46;
+        border-radius: 18px;
+        color: #f4f4f5;
+        display: block;
+        font-weight: 700;
+        padding: 18px;
+      }
+      #fallback input { display: none; }
       #status { color: #ccfbf1; font-size: 14px; min-height: 22px; }
     </style>
   </head>
@@ -49,6 +60,11 @@
       <div id="status">Ready</div>
       <button id="start" type="button">Start singing</button>
       <button id="stop" type="button">Done</button>
+      <div id="fallback">
+        <p>Your browser is blocking live mic access on this local link. Record audio with your phone, then upload it here.</p>
+        <label for="file">Upload recording</label>
+        <input id="file" type="file" accept="audio/*" capture />
+      </div>
     </main>
     <script>
       const params = new URLSearchParams(window.location.search);
@@ -56,11 +72,43 @@
       const statusEl = document.getElementById("status");
       const startBtn = document.getElementById("start");
       const stopBtn = document.getElementById("stop");
+      const fallbackEl = document.getElementById("fallback");
+      const fileInput = document.getElementById("file");
       let recorder;
       let chunks = [];
 
+      function uploadUrl() {
+        return `/api/karaoke/submit${trackId ? `?track_id=${encodeURIComponent(trackId)}` : ""}`;
+      }
+
+      function showFallback(message) {
+        statusEl.textContent = message || "Live microphone is not available.";
+        fallbackEl.style.display = "flex";
+        fallbackEl.style.flexDirection = "column";
+        fallbackEl.style.gap = "14px";
+        startBtn.style.display = "none";
+        stopBtn.style.display = "none";
+      }
+
+      async function submitBlob(blob) {
+        const response = await fetch(uploadUrl(), {
+          method: "POST",
+          headers: { "Content-Type": blob.type || "audio/webm" },
+          body: blob,
+        });
+        if (!response.ok) throw new Error("Upload failed.");
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+        showFallback("This browser cannot use live mic recording on this link.");
+      }
+
       startBtn.addEventListener("click", async () => {
         try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+            showFallback("This browser cannot use live mic recording on this link.");
+            return;
+          }
           chunks = [];
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           recorder = new MediaRecorder(stream);
@@ -72,7 +120,7 @@
           stopBtn.style.display = "block";
           statusEl.textContent = "Recording...";
         } catch (error) {
-          statusEl.textContent = error.message || "Microphone permission failed.";
+          showFallback(error.message || "Microphone permission failed.");
         }
       });
 
@@ -83,13 +131,7 @@
         recorder.onstop = async () => {
           try {
             const blob = new Blob(chunks, { type: "audio/webm" });
-            const query = trackId ? `?track_id=${encodeURIComponent(trackId)}` : "";
-            const response = await fetch(`/api/karaoke/submit${query}`, {
-              method: "POST",
-              headers: { "Content-Type": "audio/webm" },
-              body: blob,
-            });
-            if (!response.ok) throw new Error("Upload failed.");
+            await submitBlob(blob);
             statusEl.textContent = "Submitted. Check the desktop.";
             stopBtn.style.display = "none";
           } catch (error) {
@@ -99,6 +141,18 @@
         };
         recorder.stop();
         recorder.stream.getTracks().forEach((track) => track.stop());
+      });
+
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        try {
+          statusEl.textContent = "Uploading...";
+          await submitBlob(file);
+          statusEl.textContent = "Submitted. Check the desktop.";
+        } catch (error) {
+          statusEl.textContent = error.message || "Could not upload recording.";
+        }
       });
     </script>
   </body>

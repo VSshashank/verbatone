@@ -12,6 +12,8 @@ async function fetchJson(url, options) {
   return data;
 }
 
+const DEFAULT_LYRIC_LEAD = 0.3;
+
 export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const [ttml, setTtml] = useState("");
   const [lyricsText, setLyricsText] = useState("");
@@ -20,7 +22,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [showPhonetics, setShowPhonetics] = useState(false);
-  const [timeOffset, setTimeOffset] = useState(0);
+  const [timeOffset, setTimeOffset] = useState(DEFAULT_LYRIC_LEAD);
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
@@ -36,7 +38,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     setMessage("");
     setError("");
     setShowPhonetics(false);
-    setTimeOffset(0);
+    setTimeOffset(DEFAULT_LYRIC_LEAD);
     if (!track?.id) return undefined;
     loadTtml(track.id);
     if (track.status === "aligning" || track.status === "fetching_lyrics") {
@@ -202,6 +204,12 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     return (effectiveTime - word.start) / duration;
   }
 
+  function syncLabel() {
+    if (timeOffset === 0) return "Lyrics at audio time";
+    if (timeOffset > 0) return `Lyrics ${timeOffset.toFixed(1)}s early`;
+    return `Lyrics ${Math.abs(timeOffset).toFixed(1)}s late`;
+  }
+
   function renderPhoneticLine(line, isActiveLine) {
     return (
       <p
@@ -355,11 +363,11 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
       {ttml && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
-          <span>Timing offset: {timeOffset >= 0 ? "+" : ""}{timeOffset.toFixed(1)}s</span>
+          <span>{syncLabel()}</span>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setTimeOffset((value) => Number((value - 0.1).toFixed(1)))}
+              onClick={() => setTimeOffset((value) => Number((value + 0.1).toFixed(1)))}
               className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:bg-zinc-800"
               title="Show lyrics earlier"
               aria-label="Show lyrics earlier"
@@ -368,16 +376,16 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
             </button>
             <button
               type="button"
-              onClick={() => setTimeOffset(0)}
+              onClick={() => setTimeOffset(DEFAULT_LYRIC_LEAD)}
               className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:bg-zinc-800"
-              title="Reset lyric timing"
-              aria-label="Reset lyric timing"
+              title="Reset lyric timing lead"
+              aria-label="Reset lyric timing lead"
             >
               <RefreshCcw className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
             <button
               type="button"
-              onClick={() => setTimeOffset((value) => Number((value + 0.1).toFixed(1)))}
+              onClick={() => setTimeOffset((value) => Number((value - 0.1).toFixed(1)))}
               className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 text-zinc-300 transition hover:bg-zinc-800"
               title="Show lyrics later"
               aria-label="Show lyrics later"
