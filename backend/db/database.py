@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 
@@ -211,3 +212,26 @@ def set_setting(key, value):
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
             (key, value),
         )
+
+
+def insert_karaoke_score(track_id, score, player="Solo"):
+    score_id = str(uuid.uuid4())
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO karaoke_scores
+              (id, track_id, player, pitch, timing, consistency, completion, total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                score_id,
+                track_id,
+                player,
+                int(score.get("pitch", 0)),
+                int(score.get("timing", 0)),
+                int(score.get("consistency", 0)),
+                int(score.get("completion", 0)),
+                int(score.get("total", 0)),
+            ),
+        )
+    return score_id

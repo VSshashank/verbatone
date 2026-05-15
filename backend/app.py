@@ -4,9 +4,13 @@ load_dotenv()
 
 import mimetypes
 import os
+import socket
+import subprocess
 import threading
+import time
 import wave
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file
@@ -20,6 +24,7 @@ from db.database import (
     find_track_by_path,
     get_setting,
     init_db,
+    insert_karaoke_score,
     insert_track,
     list_tracks,
     normalize_path,
@@ -28,10 +33,12 @@ from db.database import (
 )
 from lyrics.genius_client import fetch_lyrics_result as fetch_genius_lyrics
 from lyrics.musixmatch_client import fetch_lyrics_result as fetch_musixmatch_lyrics
+from pipeline.demucs_runner import separate as separate_stems
 from pipeline.phonetics import romanize_words
 from pipeline.ttml_generator import generate_ttml
 from pipeline.whisperx_runner import align as align_words
 from pipeline.whisperx_runner import transcribe as transcribe_words
+from scoring.karaoke_scorer import score as score_karaoke
 
 
 SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg"}
@@ -39,8 +46,20 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 TTML_DIR = DATA_DIR / "ttml"
 COVERS_DIR = DATA_DIR / "covers"
+STEMS_DIR = DATA_DIR / "stems"
+KARAOKE_DIR = DATA_DIR / "karaoke"
 BACKEND_PORT = int(os.environ.get("VERBATONE_BACKEND_PORT", "5051"))
 ALIGNMENT_JOBS = {}
+STEM_JOBS = {}
+KARAOKE_SUBMISSION = {
+    "ready": False,
+    "track_id": None,
+    "webm_path": None,
+    "wav_path": None,
+    "score": None,
+    "error": None,
+    "submitted_at": None,
+}
 PHONETIC_LANGUAGES = {"hi", "kn", "ta", "te", "ml", "mr", "gu", "pa"}
 
 app = Flask(__name__)
@@ -220,10 +239,89 @@ def remove_file_if_safe(path):
 
 def remove_track_artifacts(track, delete_audio=False):
     remove_file_if_safe(track.get("ttml_path"))
+    remove_file_if_safe(track.get("vocals_path"))
+    remove_file_if_safe(track.get("instrumental_path"))
     if delete_audio:
         remove_file_if_safe(track.get("path"))
     for ext in ["jpg", "png"]:
         remove_file_if_safe(COVERS_DIR / f"{track['id']}.{ext}")
+
+
+def audio_mime_type(path):
+    suffix = Path(path).suffix.lower()
+    if suffix in {".m4a", ".mp4"}:
+        return "audio/mp4"
+    if suffix == ".aac":
+        return "audio/aac"
+    if suffix == ".ogg":
+        return "audio/ogg"
+    if suffix == ".flac":
+        return "audio/flac"
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+
+def serve_audio_file(path):
+    return send_file(
+        path,
+        mimetype=audio_mime_type(path),
+        conditional=True,
+        etag=True,
+        last_modified=os.path.getmtime(path),
+    )
+
+
+def local_network_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def stem_state(track):
+    if not track:
+        return {"status": "missing"}
+    if track.get("vocals_path") and track.get("instrumental_path"):
+        if os.path.exists(track["vocals_path"]) and os.path.exists(track["instrumental_path"]):
+            return {
+                "status": "ready",
+                "vocals_url": f"/api/stems/{track['id']}/vocals",
+                "instrumental_url": f"/api/stems/{track['id']}/instrumental",
+                "track": track,
+            }
+    job = STEM_JOBS.get(track["id"])
+    if job:
+        return {"status": job.get("status", "processing"), "error": job.get("error"), "track": track}
+    return {"status": "unprepared", "track": track}
+
+
+def run_stem_job(track_id):
+    STEM_JOBS[track_id] = {"status": "processing", "error": None}
+    try:
+        track = find_track(track_id)
+        if not track:
+            STEM_JOBS[track_id] = {"status": "error", "error": "Track not found."}
+            return
+        if not os.path.exists(track["path"]):
+            STEM_JOBS[track_id] = {"status": "error", "error": "Audio file is missing."}
+            return
+
+        output_dir = STEMS_DIR / track_id
+        stems = separate_stems(track["path"], output_dir)
+        updated = update_track(
+            track_id,
+            status="karaoke_ready",
+            vocals_path=stems["vocals"],
+            instrumental_path=stems["no_vocals"],
+        )
+        STEM_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
+    except Exception as exc:
+        STEM_JOBS[track_id] = {"status": "error", "error": str(exc)}
 
 
 def run_alignment_job(track_id, lyrics_text=None, language=None):
@@ -560,14 +658,155 @@ def audio(track_id):
     if not os.path.exists(audio_path):
         return jsonify({"error": "Audio file no longer exists at its original path."}), 404
 
-    mime_type = mimetypes.guess_type(audio_path)[0] or "application/octet-stream"
-    return send_file(
-        audio_path,
-        mimetype=mime_type,
-        conditional=True,
-        etag=True,
-        last_modified=os.path.getmtime(audio_path),
-    )
+    return serve_audio_file(audio_path)
+
+
+@app.route("/api/stems/<track_id>", methods=["GET"])
+def stems(track_id):
+    found = find_track(track_id)
+    if not found:
+        return jsonify({"error": "Track not found."}), 404
+    return jsonify(stem_state(found))
+
+
+@app.route("/api/stems/<track_id>/prepare", methods=["POST"])
+def prepare_stems(track_id):
+    found = find_track(track_id)
+    if not found:
+        return jsonify({"error": "Track not found."}), 404
+    state = stem_state(found)
+    if state["status"] == "ready":
+        return jsonify(state)
+    if state["status"] == "processing":
+        return jsonify(state), 202
+
+    thread = threading.Thread(target=run_stem_job, args=(track_id,), daemon=True)
+    thread.start()
+    return jsonify({"status": "processing", "track": find_track(track_id)}), 202
+
+
+@app.route("/api/stems/<track_id>/vocals", methods=["GET"])
+def stem_vocals(track_id):
+    found = find_track(track_id)
+    if not found or not found.get("vocals_path") or not os.path.exists(found["vocals_path"]):
+        return jsonify({"error": "Vocals stem is not ready."}), 404
+    return serve_audio_file(found["vocals_path"])
+
+
+@app.route("/api/stems/<track_id>/instrumental", methods=["GET"])
+def stem_instrumental(track_id):
+    found = find_track(track_id)
+    if not found or not found.get("instrumental_path") or not os.path.exists(found["instrumental_path"]):
+        return jsonify({"error": "Instrumental stem is not ready."}), 404
+    return serve_audio_file(found["instrumental_path"])
+
+
+@app.route("/mic", methods=["GET"])
+def mic_page():
+    return send_file(Path(__file__).resolve().parent / "mic" / "templates" / "mic.html")
+
+
+@app.route("/api/karaoke/qr", methods=["GET"])
+def karaoke_qr():
+    try:
+        import qrcode
+    except ImportError:
+        return jsonify({"error": "QR generation needs qrcode[pil]. Install backend requirements first."}), 500
+
+    track_id = request.args.get("track_id")
+    url = f"http://{local_network_ip()}:{BACKEND_PORT}/mic"
+    if track_id:
+        url = f"{url}?track_id={track_id}"
+    img = qrcode.make(url)
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return send_file(buffer, mimetype="image/png")
+
+
+@app.route("/api/karaoke/reset", methods=["POST"])
+def karaoke_reset():
+    payload = request.get_json(silent=True) or {}
+    for key in ["webm_path", "wav_path"]:
+        remove_file_if_safe(KARAOKE_SUBMISSION.get(key))
+    KARAOKE_SUBMISSION.update({
+        "ready": False,
+        "track_id": payload.get("track_id"),
+        "webm_path": None,
+        "wav_path": None,
+        "score": None,
+        "error": None,
+        "submitted_at": None,
+    })
+    return jsonify({"ok": True, "ready": False})
+
+
+@app.route("/api/karaoke/submit", methods=["POST"])
+def karaoke_submit():
+    track_id = request.args.get("track_id") or request.form.get("track_id")
+    KARAOKE_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = int(time.time() * 1000)
+    webm_path = KARAOKE_DIR / f"received_{timestamp}.webm"
+    wav_path = KARAOKE_DIR / f"received_{timestamp}.wav"
+
+    try:
+        webm_path.write_bytes(request.get_data())
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(webm_path), str(wav_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        KARAOKE_SUBMISSION.update({
+            "ready": True,
+            "track_id": track_id,
+            "webm_path": str(webm_path),
+            "wav_path": str(wav_path),
+            "score": None,
+            "error": None,
+            "submitted_at": timestamp,
+        })
+        return jsonify({"ok": True, "ready": True})
+    except Exception as exc:
+        KARAOKE_SUBMISSION.update({
+            "ready": False,
+            "track_id": track_id,
+            "webm_path": str(webm_path),
+            "wav_path": None,
+            "score": None,
+            "error": str(exc),
+            "submitted_at": timestamp,
+        })
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/karaoke/status", methods=["GET"])
+def karaoke_status():
+    return jsonify({
+        "ready": KARAOKE_SUBMISSION["ready"],
+        "track_id": KARAOKE_SUBMISSION["track_id"],
+        "error": KARAOKE_SUBMISSION["error"],
+        "score": KARAOKE_SUBMISSION["score"],
+    })
+
+
+@app.route("/api/score", methods=["GET", "POST"])
+def score_submission():
+    payload = request.get_json(silent=True) or {}
+    track_id = payload.get("track_id") or request.args.get("track_id") or KARAOKE_SUBMISSION.get("track_id")
+    player = payload.get("player") or request.args.get("player") or "Solo"
+    track = find_track(track_id) if track_id else None
+    if not track:
+        return jsonify({"error": "Track not found for scoring."}), 404
+    if not KARAOKE_SUBMISSION.get("ready") or not KARAOKE_SUBMISSION.get("wav_path"):
+        return jsonify({"error": "No karaoke recording is ready yet."}), 400
+    if not track.get("vocals_path") or not os.path.exists(track["vocals_path"]):
+        return jsonify({"error": "Vocals stem is not ready for this track."}), 400
+
+    result = score_karaoke(track["vocals_path"], KARAOKE_SUBMISSION["wav_path"])
+    insert_karaoke_score(track["id"], result, player=player)
+    KARAOKE_SUBMISSION["score"] = result
+    return jsonify({"score": result})
 
 
 @app.route("/api/settings", methods=["GET"])

@@ -1,6 +1,7 @@
-import { Pause, Play, SkipBack, SkipForward, Volume2 } from "lucide-react";
-import { useMemo, useRef } from "react";
+import { AlertTriangle, Mic2, Pause, Play, SkipBack, SkipForward, Volume2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import LyricsDisplay from "./LyricsDisplay.jsx";
+import KaraokeSolo from "./KaraokeSolo.jsx";
 import { useAudioSync } from "../hooks/useAudioSync.js";
 
 function formatTime(seconds) {
@@ -13,6 +14,9 @@ function formatTime(seconds) {
 
 export default function Player({ track, tracks, onSelectTrack, onTrackUpdated }) {
   const audioRef = useRef(null);
+  const [playbackError, setPlaybackError] = useState("");
+  const [karaokeOpen, setKaraokeOpen] = useState(false);
+  const [useInstrumental, setUseInstrumental] = useState(false);
   const { currentTime, duration, isPlaying, seek } = useAudioSync(audioRef);
 
   const activeIndex = useMemo(
@@ -22,17 +26,36 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
   const hasPrevious = activeIndex > 0;
   const hasNext = activeIndex >= 0 && activeIndex < tracks.length - 1;
 
-  // Removed: explicit audio.load() on track change.
-  // React's src update already triggers a natural load — calling load()
-  // again caused a duplicate network request for every track switch.
+  const audioSrc = track
+    ? useInstrumental
+      ? `/api/stems/${track.id}/instrumental`
+      : `/api/audio/${track.id}`
+    : undefined;
+
+  useEffect(() => {
+    setPlaybackError("");
+    setUseInstrumental(false);
+    setKaraokeOpen(false);
+  }, [track?.id]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.load();
+  }, [audioSrc]);
 
   async function togglePlay() {
     const audio = audioRef.current;
     if (!audio || !track) return;
-    if (audio.paused) {
-      await audio.play();
-    } else {
-      audio.pause();
+    setPlaybackError("");
+    try {
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
+    } catch (err) {
+      setPlaybackError(err.message || "The browser could not start playback.");
     }
   }
 
@@ -46,12 +69,12 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-[#121417]">
-      <div className="min-h-0 flex-1 overflow-y-auto p-6">
+    <section className="flex min-h-0 flex-1 flex-col bg-[#111316]">
+      <div className="min-h-0 flex-1 overflow-y-auto p-5">
         {track ? (
-          <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-            <div className="grid grid-cols-[minmax(180px,260px)_minmax(0,1fr)] gap-6 max-md:grid-cols-1">
-              <div className="aspect-square overflow-hidden rounded-md bg-[#24282d]">
+          <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
+            <div className="grid grid-cols-[minmax(190px,280px)_minmax(0,1fr)] gap-5 rounded-md border border-zinc-800 bg-[#171a1d] p-4 max-md:grid-cols-1">
+              <div className="aspect-square overflow-hidden rounded-md bg-[#24282d] shadow-lg">
                 {track.cover_art ? (
                   <img src={track.cover_art} alt="" className="h-full w-full object-cover" />
                 ) : (
@@ -62,10 +85,15 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
               </div>
 
               <div className="flex min-w-0 flex-col justify-center">
-                <p className="mb-2 text-xs uppercase tracking-normal text-teal-300">
-                  Now playing
-                </p>
-                <h2 className="truncate text-3xl font-semibold tracking-normal text-zinc-50 max-md:text-2xl">
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className="rounded-md border border-teal-400/30 bg-teal-400/10 px-2 py-1 text-xs font-medium text-teal-100">
+                    {useInstrumental ? "Karaoke backing" : "Now playing"}
+                  </span>
+                  <span className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400">
+                    {track.status || "unprocessed"}
+                  </span>
+                </div>
+                <h2 className="text-balance text-3xl font-semibold tracking-normal text-zinc-50 max-md:text-2xl">
                   {track.title || "Untitled"}
                 </h2>
                 <p className="mt-2 truncate text-base text-zinc-300">
@@ -74,7 +102,7 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
                 <p className="mt-1 truncate text-sm text-zinc-500">
                   {track.album || "Unknown Album"}
                 </p>
-                <div className="mt-6 rounded-md border border-zinc-800 bg-[#171a1d] p-4">
+                <div className="mt-6 rounded-md border border-zinc-800 bg-[#101214] p-4">
                   <div className="flex items-center justify-between text-xs tabular-nums text-zinc-400">
                     <span>{formatTime(currentTime)}</span>
                     <span>{formatTime(duration || track.duration)}</span>
@@ -90,8 +118,32 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
                     aria-label="Seek"
                   />
                 </div>
+                {playbackError && (
+                  <div className="mt-3 flex items-start gap-2 rounded-md border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>{playbackError}</span>
+                  </div>
+                )}
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setKaraokeOpen((value) => !value)}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 text-sm font-medium text-amber-100 transition hover:bg-amber-400/20"
+                  >
+                    <Mic2 className="h-4 w-4" aria-hidden="true" />
+                    {karaokeOpen ? "Hide karaoke" : "Solo karaoke"}
+                  </button>
+                </div>
               </div>
             </div>
+            {karaokeOpen && (
+              <KaraokeSolo
+                track={track}
+                isInstrumental={useInstrumental}
+                onUseInstrumental={setUseInstrumental}
+                onTrackUpdated={onTrackUpdated}
+              />
+            )}
             <LyricsDisplay
               track={track}
               currentTime={currentTime}
@@ -115,8 +167,17 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
       <div className="border-t border-zinc-800 bg-[#171a1d] px-4 py-3">
         <audio
           ref={audioRef}
-          src={track ? `/api/audio/${track.id}` : undefined}
+          src={audioSrc}
           onEnded={handleEnded}
+          onError={() => {
+            const audio = audioRef.current;
+            const code = audio?.error?.code;
+            setPlaybackError(
+              code
+                ? `Audio could not be loaded by the browser. Error code ${code}.`
+                : "Audio could not be loaded by the browser.",
+            );
+          }}
           preload="metadata"
         />
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">

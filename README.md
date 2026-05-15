@@ -35,3 +35,6 @@ The frontend proxies `/api` to `http://127.0.0.1:5051` by default. Override it w
   Secret will be rejected by the API.
 - Existing synced lyrics should be regenerated after lyric-format changes to get
   the newest line preservation and smoother karaoke rendering.
+- Solo karaoke can prepare Demucs stems on demand, show a phone mic QR code,
+  receive a phone recording, and score it against the isolated vocal stem.
+  This requires `ffmpeg`, `demucs`, `librosa`, and `qrcode[pil]`.

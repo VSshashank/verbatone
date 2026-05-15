@@ -8,3 +8,6 @@ whisperx
 indic-transliteration
 python-dotenv
 requests
+demucs
+librosa
+qrcode[pil]
