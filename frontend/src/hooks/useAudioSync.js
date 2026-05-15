@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export function useAudioSync(audioRef) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const frameRef = useRef(null);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -13,8 +14,29 @@ export function useAudioSync(audioRef) {
     const updateDuration = () => {
       setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     };
-    const markPlaying = () => setIsPlaying(true);
-    const markPaused = () => setIsPlaying(false);
+    const stopFrameLoop = () => {
+      if (frameRef.current) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+    const tick = () => {
+      setCurrentTime(audio.currentTime || 0);
+      frameRef.current = audio.paused ? null : window.requestAnimationFrame(tick);
+    };
+    const startFrameLoop = () => {
+      stopFrameLoop();
+      frameRef.current = window.requestAnimationFrame(tick);
+    };
+    const markPlaying = () => {
+      setIsPlaying(true);
+      startFrameLoop();
+    };
+    const markPaused = () => {
+      setIsPlaying(false);
+      updateTime();
+      stopFrameLoop();
+    };
 
     audio.addEventListener("timeupdate", updateTime);
     audio.addEventListener("loadedmetadata", updateDuration);
@@ -33,6 +55,7 @@ export function useAudioSync(audioRef) {
       audio.removeEventListener("play", markPlaying);
       audio.removeEventListener("pause", markPaused);
       audio.removeEventListener("ended", markPaused);
+      stopFrameLoop();
     };
   }, [audioRef]);
 

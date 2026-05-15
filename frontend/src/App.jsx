@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
 import Library from "./components/Library.jsx";
 import Player from "./components/Player.jsx";
 
@@ -127,6 +128,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hasApiKeys, setHasApiKeys] = useState(true); // assume true until checked
+  const [apiBannerDismissed, setApiBannerDismissed] = useState(false);
 
   const selectedTrack = useMemo(
     () => tracks.find((track) => track.id === selectedTrackId) || null,
@@ -147,7 +149,7 @@ export default function App() {
   async function checkApiKeys() {
     try {
       const settings = await fetchJson("/api/settings");
-      setHasApiKeys(settings.genius_token || settings.musixmatch_key);
+      setHasApiKeys(Boolean(settings.genius_token || settings.musixmatch_key));
     } catch {
       /* ignore */
     }
@@ -159,6 +161,18 @@ export default function App() {
     });
     checkApiKeys();
   }, []);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(""), 5200);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!error) return undefined;
+    const timer = window.setTimeout(() => setError(""), 12000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
 
   async function importPath(path) {
     setIsImporting(true);
@@ -267,30 +281,61 @@ export default function App() {
         isLibraryLoading={isLibraryLoading}
       />
       <div className="relative flex min-h-0 flex-col">
-        {!hasApiKeys && (
-          <div className="border-b border-amber-400/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">
-            Add your Genius API key in{" "}
+        {!hasApiKeys && !apiBannerDismissed && (
+          <div className="flex items-center justify-between gap-3 border-b border-amber-400/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">
+            <span>
+              Add your Genius API key in{" "}
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="underline"
+              >
+                Settings
+              </button>{" "}
+              to enable auto lyrics fetching.
+            </span>
             <button
               type="button"
-              onClick={() => setSettingsOpen(true)}
-              className="underline"
+              onClick={() => setApiBannerDismissed(true)}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-amber-100/70 transition hover:bg-amber-300/10 hover:text-amber-50"
+              title="Dismiss"
+              aria-label="Dismiss API key reminder"
             >
-              Settings
-            </button>{" "}
-            to enable auto lyrics fetching.
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
         )}
         {(notice || error) && (
           <div className="absolute left-4 right-4 top-4 z-10 space-y-2">
             {notice && (
-              <div className="rounded-md border border-teal-400/40 bg-[#10201f] px-3 py-2 text-sm text-teal-100 shadow-lg">
-                {notice}
+              <div className="flex items-start justify-between gap-3 rounded-md border border-teal-400/40 bg-[#10201f] px-3 py-2 text-sm text-teal-100 shadow-lg">
+                <span>{notice}</span>
+                <button
+                  type="button"
+                  onClick={() => setNotice("")}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-teal-100/70 transition hover:bg-teal-300/10 hover:text-teal-50"
+                  title="Dismiss"
+                  aria-label="Dismiss notice"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
               </div>
             )}
             {error && (
-              <pre className="max-h-32 overflow-auto rounded-md border border-rose-400/40 bg-[#241517] px-3 py-2 text-sm whitespace-pre-wrap text-rose-100 shadow-lg">
-                {error}
-              </pre>
+              <div className="flex items-start justify-between gap-3 rounded-md border border-rose-400/40 bg-[#241517] px-3 py-2 text-sm text-rose-100 shadow-lg">
+                <pre className="max-h-32 min-w-0 flex-1 overflow-auto whitespace-pre-wrap">
+                  {error}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => setError("")}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-rose-100/70 transition hover:bg-rose-300/10 hover:text-rose-50"
+                  title="Dismiss"
+                  aria-label="Dismiss error"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
             )}
           </div>
         )}

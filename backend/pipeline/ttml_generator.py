@@ -139,7 +139,7 @@ def resampled_time_slots(timed_words, target_count):
 
 
 def normalized_token(value):
-    return re.sub(r"[^a-z0-9']+", "", str(value or "").lower()).strip("'")
+    return re.sub(r"[^\w']+", "", str(value or "").lower(), flags=re.UNICODE).strip("_'")
 
 
 def enforce_monotonic_slots(slots, min_duration=0.08):
@@ -187,7 +187,7 @@ def anchored_time_slots(timed_words, lyric_words):
     lyric_tokens = [normalized_token(word) for word in lyric_words]
 
     if not transcript_tokens:
-        return resampled_time_slots(timed_words, len(lyric_words))
+        return []
 
     anchors = [None] * len(lyric_words)
     matcher = SequenceMatcher(None, transcript_tokens, lyric_tokens, autojunk=False)
@@ -208,7 +208,7 @@ def anchored_time_slots(timed_words, lyric_words):
 
     minimum_matches = min(6, max(2, len(lyric_words) // 8))
     if matched_count < minimum_matches:
-        return resampled_time_slots(timed_words, len(lyric_words))
+        return []
 
     total_start = float(timed_words[0].get("start", 0))
     total_end = float(timed_words[-1].get("end", total_start + len(lyric_words) * 0.16))
@@ -252,24 +252,18 @@ def words_with_lyrics_text(words, lyrics_text=None):
     if not timed_words:
         return words, None
 
-    if len(lyric_words) == len(timed_words):
-        mapped_words = [
-            {
-                **word,
-                "word": lyric_words[index],
-            }
-            for index, word in enumerate(timed_words)
-        ]
-    else:
-        slots = anchored_time_slots(timed_words, lyric_words)
-        mapped_words = [
-            {
-                **slots[index],
-                "word": lyric_words[index],
-                "phonetic": None,
-            }
-            for index in range(len(lyric_words))
-        ]
+    slots = anchored_time_slots(timed_words, lyric_words)
+    if not slots:
+        return words, None
+
+    mapped_words = [
+        {
+            **slots[index],
+            "word": lyric_words[index],
+            "phonetic": None,
+        }
+        for index in range(len(lyric_words))
+    ]
 
     groups = []
     cursor = 0

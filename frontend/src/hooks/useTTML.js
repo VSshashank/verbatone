@@ -11,9 +11,12 @@ function timeToSeconds(value) {
 function findActiveWordIndex(words, currentTime) {
   if (!words.length) return -1;
 
-  const exactIndex = words.findIndex(
-    (word) => currentTime >= word.start && currentTime <= word.end,
-  );
+  const exactIndex = words.findIndex((word, index) => {
+    const start = word.visualStart ?? word.start;
+    const end = word.visualEnd ?? word.end;
+    const isLast = index === words.length - 1;
+    return currentTime >= start && (isLast ? currentTime <= end : currentTime < end);
+  });
   if (exactIndex >= 0) return exactIndex;
 
   if (currentTime < words[0].start) return -1;
@@ -27,7 +30,43 @@ function findActiveWordIndex(words, currentTime) {
   }
 
   const lastWord = words[words.length - 1];
-  return currentTime > lastWord.end && currentTime - lastWord.end <= 0.75 ? words.length - 1 : -1;
+  const lastEnd = lastWord.visualEnd ?? lastWord.end;
+  return currentTime > lastEnd && currentTime - lastEnd <= 0.35 ? words.length - 1 : -1;
+}
+
+function addVisualTiming(lines) {
+  const lyricWords = lines.flatMap((line) => line.words);
+
+  lyricWords.forEach((word, index) => {
+    const next = lyricWords[index + 1];
+    const minimumEnd = Math.max(word.end, word.start + 0.18);
+    let visualEnd = minimumEnd;
+
+    if (next && next.lineIndex === word.lineIndex) {
+      visualEnd = Math.max(minimumEnd, next.start);
+    } else if (next) {
+      const gap = Math.max(next.start - word.end, 0);
+      if (gap <= 2.25) {
+        visualEnd = Math.max(minimumEnd, Math.min(next.start, word.end + Math.max(0.45, gap * 0.65)));
+      } else {
+        visualEnd = minimumEnd + 0.75;
+      }
+    } else {
+      visualEnd = minimumEnd + 0.75;
+    }
+
+    word.visualStart = word.start;
+    word.visualEnd = visualEnd;
+  });
+
+  return lines.map((line) => {
+    if (!line.words.length) return line;
+    return {
+      ...line,
+      visualStart: line.words[0].visualStart ?? line.start,
+      visualEnd: line.words[line.words.length - 1].visualEnd ?? line.end,
+    };
+  });
 }
 
 export function useTTML(ttmlString, currentTime) {
@@ -85,14 +124,17 @@ export function useTTML(ttmlString, currentTime) {
         lineIndex,
       };
     });
-    setLines(parsedLines);
+    setLines(addVisualTiming(parsedLines));
   }, [ttmlString]);
 
   const words = useMemo(() => lines.flatMap((line) => line.words), [lines]);
   const activeIdx = findActiveWordIndex(words, currentTime);
   const activeWord = activeIdx >= 0 ? words[activeIdx] : null;
   const activeLine = lines.find(
-    (line) => line.kind === "lyric" && currentTime >= line.start && currentTime <= line.end,
+    (line) =>
+      line.kind === "lyric" &&
+      currentTime >= (line.visualStart ?? line.start) &&
+      currentTime <= (line.visualEnd ?? line.end),
   );
   const activeLineIdx = activeWord?.lineIndex ?? activeLine?.lineIndex ?? -1;
 

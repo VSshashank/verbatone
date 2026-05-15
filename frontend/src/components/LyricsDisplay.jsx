@@ -1,5 +1,5 @@
 import { FileText, Minus, PencilLine, Plus, RefreshCcw, RefreshCw, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useTTML } from "../hooks/useTTML.js";
 import PhoneticLayer from "./PhoneticLayer.jsx";
 
@@ -198,10 +198,12 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   }
 
   function wordProgress(word) {
-    if (effectiveTime <= word.start) return 0;
-    if (effectiveTime >= word.end) return 1;
-    const duration = Math.max(word.end - word.start, 0.001);
-    return (effectiveTime - word.start) / duration;
+    const start = word.visualStart ?? word.start;
+    const end = word.visualEnd ?? word.end;
+    if (effectiveTime <= start) return 0;
+    if (effectiveTime >= end) return 1;
+    const duration = Math.max(end - start, 0.001);
+    return (effectiveTime - start) / duration;
   }
 
   function syncLabel() {
@@ -224,33 +226,35 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
           const completed = progress >= 1;
           const globalActive = progress > 0 && progress < 1;
           return (
-            <span
-              key={word.id}
-              className="mr-2 inline-block align-baseline transition-transform duration-300 ease-out"
-              style={{
-                transform: globalActive ? "translateY(-1px) scale(1.035)" : "none",
-              }}
-            >
+            <Fragment key={word.id}>
               <span
-                className="inline-block bg-clip-text text-transparent transition-[background-image,filter] duration-150 ease-linear"
+                className="mr-2 inline-block align-baseline transition-transform duration-300 ease-out"
                 style={{
-                  backgroundImage: `linear-gradient(90deg, #fde68a ${Math.round(
-                    progress * 100,
-                  )}%, ${completed ? "#fde68a" : "#71717a"} ${Math.round(
-                    progress * 100,
-                  )}%)`,
-                  WebkitBackgroundClip: "text",
-                  filter: globalActive ? "drop-shadow(0 0 10px rgba(251, 191, 36, 0.3))" : "none",
+                  transform: globalActive ? "translateY(-1px) scale(1.035)" : "none",
                 }}
               >
-                {word.text}
-              </span>
-              {showPhonetics && word.phonetic && (
-                <span className="mb-1 block text-xs leading-none text-zinc-500">
-                  {word.phonetic}
+                <span
+                  className="inline-block bg-clip-text text-transparent transition-[background-image,filter] duration-150 ease-linear"
+                  style={{
+                    backgroundImage: `linear-gradient(90deg, #fde68a ${Math.round(
+                      progress * 100,
+                    )}%, ${completed ? "#fde68a" : "#71717a"} ${Math.round(
+                      progress * 100,
+                    )}%)`,
+                    WebkitBackgroundClip: "text",
+                    filter: globalActive ? "drop-shadow(0 0 10px rgba(251, 191, 36, 0.3))" : "none",
+                  }}
+                >
+                  {word.text}
                 </span>
-              )}
-            </span>
+                {showPhonetics && word.phonetic && (
+                  <span className="mb-1 block text-xs leading-none text-zinc-500">
+                    {word.phonetic}
+                  </span>
+                )}
+              </span>
+              {" "}
+            </Fragment>
           );
         })}
       </p>
@@ -452,16 +456,18 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
                   }`}
                 >
                   {line.words.map((word) => (
-                    <span
-                      key={word.id}
-                      className={`mr-2 inline-block align-baseline transition-[color,transform,filter] duration-200 ease-out ${lyricWordClass(
-                        word,
-                        isActiveLine,
-                      )}`}
-                      style={lyricWordStyle(word)}
-                    >
-                      {word.text}
-                    </span>
+                    <Fragment key={word.id}>
+                      <span
+                        className={`mr-2 inline-block align-baseline transition-[color,transform,filter] duration-200 ease-out ${lyricWordClass(
+                          word,
+                          isActiveLine,
+                        )}`}
+                        style={lyricWordStyle(word)}
+                      >
+                        {word.text}
+                      </span>
+                      {" "}
+                    </Fragment>
                   ))}
                 </p>
               );
