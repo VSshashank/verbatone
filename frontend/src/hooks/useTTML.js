@@ -115,38 +115,66 @@ export function useTTML(ttmlString, currentTime) {
 
     let globalWordIndex = 0;
     const parsedLines = Array.from(doc.getElementsByTagName("p")).map((paragraph, lineIndex) => {
+      const lineBegin = timeToSeconds(paragraph.getAttribute("begin"));
+      const lineEnd   = timeToSeconds(paragraph.getAttribute("end"));
+
+      // FORMAT A: WhisperX word-level — <p> has timed <span> children
       const wordSpans = Array.from(paragraph.getElementsByTagName("span")).filter(
         (s) => s.hasAttribute("begin"),
       );
 
-      const words = wordSpans.map((span, wordIndex) => {
-        // Check for nested spans (phonetics mode)
-        const inner = Array.from(span.children);
-        const primarySpan = inner.find((s) => s.getAttribute("style") === "default");
-        const phoneticSpan = inner.find((s) => s.getAttribute("style") === "phonetic");
-
-        const text = (primarySpan || span).textContent.trim();
-        const phonetic = phoneticSpan ? phoneticSpan.textContent.trim() : null;
-
-        const word = {
-          id: `${lineIndex}-${wordIndex}`,
-          globalIndex: globalWordIndex,
-          text,
-          phonetic,
-          start: timeToSeconds(span.getAttribute("begin")),
-          end: timeToSeconds(span.getAttribute("end")),
-          lineIndex,
-        };
-        globalWordIndex += 1;
-        return word;
-      });
+      let words;
+      if (wordSpans.length > 0) {
+        // Existing word-span path — unchanged
+        words = wordSpans.map((span, wordIndex) => {
+          const inner = Array.from(span.children);
+          const primarySpan  = inner.find((s) => s.getAttribute("style") === "default");
+          const phoneticSpan = inner.find((s) => s.getAttribute("style") === "phonetic");
+          const text    = (primarySpan || span).textContent.trim();
+          const phonetic = phoneticSpan ? phoneticSpan.textContent.trim() : null;
+          const word = {
+            id: `${lineIndex}-${wordIndex}`,
+            globalIndex: globalWordIndex,
+            text,
+            phonetic,
+            start: timeToSeconds(span.getAttribute("begin")),
+            end:   timeToSeconds(span.getAttribute("end")),
+            lineIndex,
+          };
+          globalWordIndex += 1;
+          return word;
+        });
+      } else {
+        // FORMAT B: LRCLIB line-level — <p> has no timed spans.
+        // Split the line text into words and distribute timestamps evenly so
+        // the rest of useTTML (findActiveWordIndex, addVisualTiming) and
+        // LyricsDisplay (word-progress gradient) work without any changes.
+        const rawText  = paragraph.getAttribute("data-text") || paragraph.textContent.trim();
+        const tokens   = rawText.split(/\s+/).filter(Boolean);
+        const lineDur  = Math.max(lineEnd - lineBegin, 0.001);
+        words = tokens.map((token, wordIndex) => {
+          const wordStart = lineBegin + (wordIndex       / tokens.length) * lineDur;
+          const wordEnd   = lineBegin + ((wordIndex + 1) / tokens.length) * lineDur;
+          const word = {
+            id: `${lineIndex}-${wordIndex}`,
+            globalIndex: globalWordIndex,
+            text: token,
+            phonetic: null,
+            start: wordStart,
+            end:   wordEnd,
+            lineIndex,
+          };
+          globalWordIndex += 1;
+          return word;
+        });
+      }
 
       return {
         id: `line-${lineIndex}`,
         kind: paragraph.getAttribute("data-kind") || "lyric",
         text: paragraph.getAttribute("data-text") || words.map((word) => word.text).join(" "),
-        start: timeToSeconds(paragraph.getAttribute("begin")),
-        end: timeToSeconds(paragraph.getAttribute("end")),
+        start: lineBegin,
+        end:   lineEnd,
         words,
         lineIndex,
       };
