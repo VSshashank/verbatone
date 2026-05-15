@@ -55,6 +55,14 @@ function addVisualTiming(lines) {
       visualEnd = minimumEnd + 0.75;
     }
 
+    // Melisma cap — don't keep a word highlighted for more than 1.8s even
+    // if the singer holds the note longer.  Matches Apple Music behaviour:
+    // highlight on the vocal attack, not for the full held-note duration.
+    const maxVisualDuration = 1.8;
+    if (visualEnd - word.start > maxVisualDuration) {
+      visualEnd = word.start + maxVisualDuration;
+    }
+
     word.visualStart = word.start;
     word.visualEnd = visualEnd;
   });

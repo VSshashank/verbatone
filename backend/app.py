@@ -348,8 +348,18 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             }
             return
 
+        # Pattern C: use clean vocals stem for alignment when available
+        vocals_path = track.get("vocals_path")
+        if vocals_path and not os.path.exists(vocals_path):
+            vocals_path = None
+
         update_track(track_id, status="aligning")
-        result = align_words(track["path"], lyrics_text=text, language=language)
+        result = align_words(
+            track["path"],
+            lyrics_text=text,
+            language=language,
+            vocals_path=vocals_path,
+        )
         words = result.get("words", [])
         detected_language = result.get("language") or language
         if not words:
@@ -637,6 +647,132 @@ def ttml(track_id):
         return jsonify({"error": "TTML has not been generated for this track."}), 404
 
     return send_file(ttml_path, mimetype="application/ttml+xml")
+
+
+@app.route("/api/debug/ttml/<track_id>", methods=["GET"])
+def debug_ttml(track_id):
+    """Return all word timestamps from a track's TTML as JSON for diagnosis."""
+    track = find_track(track_id)
+    if not track:
+        return jsonify({"error": "Track not found."}), 404
+
+    ttml_path = track.get("ttml_path")
+    if not ttml_path or not os.path.exists(ttml_path):
+        return jsonify({"error": "No TTML file exists for this track."}), 404
+
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(ttml_path)
+    ns = {"tt": "http://www.w3.org/ns/ttml"}
+    words = []
+    for span in tree.findall(".//tt:span[@begin]", ns):
+        words.append(
+            {
+                "word": span.text.strip() if span.text else "",
+                "start": span.get("begin"),
+                "end": span.get("end"),
+            }
+        )
+    return jsonify(words)
+
+
+@app.route("/api/debug/alignment/<track_id>", methods=["GET"])
+def debug_alignment(track_id):
+    """
+    Analyse an aligned track's TTML and classify the timestamp pattern.
+
+    Returns word list, gap statistics, and a pattern classification:
+      - pattern_a: timestamps bunched early (segment coverage issue)
+      - pattern_b: large gaps / long held words (melisma)
+      - pattern_c: missing words (whisperx failed to detect vocals)
+      - ok: no obvious issues detected
+    """
+    track = find_track(track_id)
+    if not track:
+        return jsonify({"error": "Track not found."}), 404
+
+    ttml_path = track.get("ttml_path")
+    if not ttml_path or not os.path.exists(ttml_path):
+        return jsonify({"error": "No TTML file exists for this track."}), 404
+
+    import xml.etree.ElementTree as ET
+
+    def _ttml_time_to_seconds(value):
+        if not value:
+            return 0.0
+        parts = value.split(":")
+        if len(parts) != 3:
+            return float(value or 0)
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    tree = ET.parse(ttml_path)
+    ns = {"tt": "http://www.w3.org/ns/ttml"}
+    words = []
+    for span in tree.findall(".//tt:span[@begin]", ns):
+        text = span.text.strip() if span.text else ""
+        if not text:
+            continue
+        words.append(
+            {
+                "word": text,
+                "start": _ttml_time_to_seconds(span.get("begin")),
+                "end": _ttml_time_to_seconds(span.get("end")),
+            }
+        )
+
+    if not words:
+        return jsonify({"pattern": "pattern_c", "reason": "no words in TTML", "words": []})
+
+    # Compute gap and duration stats
+    durations = [w["end"] - w["start"] for w in words]
+    gaps = [
+        words[i + 1]["start"] - words[i]["end"]
+        for i in range(len(words) - 1)
+    ]
+    audio_duration = track.get("duration") or 0
+    last_word_end = words[-1]["end"]
+    coverage = last_word_end / audio_duration if audio_duration else 1.0
+
+    avg_gap = sum(gaps) / len(gaps) if gaps else 0
+    max_gap = max(gaps) if gaps else 0
+    max_duration = max(durations) if durations else 0
+    avg_duration = sum(durations) / len(durations) if durations else 0
+
+    # Classify pattern
+    pattern = "ok"
+    reason = "timestamps look normal"
+
+    if coverage < 0.5 and audio_duration > 30:
+        pattern = "pattern_a"
+        reason = (
+            f"Words only cover {coverage:.0%} of audio duration "
+            f"({last_word_end:.1f}s / {audio_duration:.1f}s). "
+            f"Timestamps are bunched early."
+        )
+    elif max_duration > 3.0 or max_gap > 4.0:
+        pattern = "pattern_b"
+        reason = (
+            f"Long held note ({max_duration:.1f}s) or large gap ({max_gap:.1f}s) detected. "
+            f"Likely melisma / slow tempo."
+        )
+
+    return jsonify(
+        {
+            "pattern": pattern,
+            "reason": reason,
+            "word_count": len(words),
+            "audio_duration": audio_duration,
+            "coverage": round(coverage, 3),
+            "stats": {
+                "avg_word_duration": round(avg_duration, 3),
+                "max_word_duration": round(max_duration, 3),
+                "avg_gap": round(avg_gap, 3),
+                "max_gap": round(max_gap, 3),
+            },
+            "words": words,
+        }
+    )
 
 
 @app.route("/api/cover/<track_id>", methods=["GET"])
