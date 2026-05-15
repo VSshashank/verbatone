@@ -42,7 +42,7 @@ def _expand_segment_coverage(segments, audio_duration):
 
 
 def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
-          model_size="base"):
+          model_size="small"):
     """
     Transcribe and align words to audio using WhisperX.
 
@@ -124,7 +124,7 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
     return {"language": language_code, "words": words}
 
 
-def transcribe(audio_path, language=None, model_size="base"):
+def transcribe(audio_path, language=None, model_size="small"):
     """
     Pure Whisper transcription with word-level timestamps.
     Used for podcasts and speech files — no lyrics text needed.
