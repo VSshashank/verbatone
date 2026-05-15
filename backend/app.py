@@ -361,6 +361,7 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             vocals_path=vocals_path,
         )
         words = result.get("words", [])
+        transcript_segments = result.get("segments", [])
         detected_language = result.get("language") or language
         if not words:
             update_track(track_id, status="needs_review", language=detected_language)
@@ -383,6 +384,7 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
                 lyrics_text=text,
                 language=detected_language,
                 include_phonetics=needs_phonetics,
+                transcript_segments=transcript_segments,
             ),
             encoding="utf-8",
         )

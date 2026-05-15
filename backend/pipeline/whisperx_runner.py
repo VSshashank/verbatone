@@ -92,6 +92,18 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
             result.get("segments", []), audio_duration
         )
 
+    # Preserve raw transcript segments — the TTML generator uses these as
+    # timing guardrails when anchor matches are sparse (common in R&B).
+    raw_segments = [
+        {
+            "start": round(float(seg.get("start", 0)), 3),
+            "end": round(float(seg.get("end", 0)), 3),
+            "text": str(seg.get("text", "")).strip(),
+        }
+        for seg in result.get("segments", [])
+        if seg.get("text", "").strip()
+    ]
+
     align_model, metadata = whisperx.load_align_model(
         language_code=language_code,
         device=device,
@@ -121,7 +133,11 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
                 }
             )
 
-    return {"language": language_code, "words": words}
+    return {
+        "language": language_code,
+        "words": words,
+        "segments": raw_segments,
+    }
 
 
 def transcribe(audio_path, language=None, model_size="small"):

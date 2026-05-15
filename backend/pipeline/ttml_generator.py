@@ -238,7 +238,108 @@ def anchored_time_slots(timed_words, lyric_words):
     return enforce_monotonic_slots(slots)
 
 
-def words_with_lyrics_text(words, lyrics_text=None):
+def segment_guided_time_slots(transcript_segments, lyric_words):
+    """
+    Distribute lyric words across WhisperX transcript segment boundaries.
+
+    When anchored_time_slots fails (too few word-level matches), this function
+    uses the raw transcript segments as timing guardrails.  Each segment's text
+    is fuzzy-matched against the remaining lyrics to decide how many lyric words
+    belong in each time zone.  Words within a zone are evenly distributed.
+
+    This is the key fix for R&B and slow-tempo tracks where WhisperX only
+    detects a few segments but the lyrics have many more words.
+    """
+    if not transcript_segments or not lyric_words:
+        return []
+
+    # Tokenise each segment's transcript text
+    seg_data = []
+    for seg in transcript_segments:
+        seg_tokens = [normalized_token(w) for w in re.findall(r"\S+", seg.get("text", ""))]
+        seg_tokens = [t for t in seg_tokens if t]
+        if not seg_tokens:
+            continue
+        seg_data.append({
+            "start": float(seg.get("start", 0)),
+            "end": float(seg.get("end", 0)),
+            "tokens": seg_tokens,
+        })
+
+    if not seg_data:
+        return []
+
+    lyric_tokens = [normalized_token(w) for w in lyric_words]
+
+    # Greedily assign lyric words to segments by fuzzy-matching each segment's
+    # transcript tokens against the remaining lyric tokens.
+    assignments = []  # list of (seg_start, seg_end, lyric_slice_start, lyric_slice_end)
+    lyric_cursor = 0
+
+    for seg in seg_data:
+        if lyric_cursor >= len(lyric_tokens):
+            break
+
+        remaining_lyrics = lyric_tokens[lyric_cursor:]
+        seg_tok = seg["tokens"]
+
+        # Use SequenceMatcher to find the best alignment window.
+        # We try matching the segment's tokens against successive windows
+        # of the remaining lyrics and pick the one with the best match ratio.
+        best_end = lyric_cursor + len(seg_tok)  # default: proportional
+        best_ratio = 0.0
+
+        # Search window: allow up to 2x the segment token count
+        search_limit = min(len(remaining_lyrics), len(seg_tok) * 3)
+        for candidate_end in range(max(1, len(seg_tok) // 2), search_limit + 1):
+            candidate = remaining_lyrics[:candidate_end]
+            matcher = SequenceMatcher(None, seg_tok, candidate, autojunk=False)
+            ratio = matcher.ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_end = lyric_cursor + candidate_end
+
+        # If match is terrible, fall back to proportional word count
+        if best_ratio < 0.15:
+            total_seg_words = sum(len(s["tokens"]) for s in seg_data)
+            proportion = len(seg_tok) / max(total_seg_words, 1)
+            best_end = lyric_cursor + max(1, round(proportion * len(lyric_words)))
+
+        best_end = min(best_end, len(lyric_words))
+        if best_end <= lyric_cursor:
+            best_end = min(lyric_cursor + 1, len(lyric_words))
+
+        assignments.append((seg["start"], seg["end"], lyric_cursor, best_end))
+        lyric_cursor = best_end
+
+    # Any remaining lyrics get appended to the last segment
+    if lyric_cursor < len(lyric_words) and assignments:
+        last_start, last_end, last_l_start, _last_l_end = assignments[-1]
+        assignments[-1] = (last_start, last_end, last_l_start, len(lyric_words))
+    elif lyric_cursor < len(lyric_words) and not assignments:
+        # Shouldn't happen, but handle gracefully
+        return []
+
+    # Distribute words within each segment evenly
+    slots = [None] * len(lyric_words)
+    for seg_start, seg_end, l_start, l_end in assignments:
+        count = l_end - l_start
+        if count <= 0:
+            continue
+        chunk = distribute_slots(seg_start, seg_end, count)
+        for offset, slot in enumerate(chunk):
+            slots[l_start + offset] = slot
+
+    # Fill any remaining None slots
+    for i in range(len(slots)):
+        if slots[i] is None:
+            prev_end = slots[i - 1]["end"] if i > 0 and slots[i - 1] else 0.0
+            slots[i] = {"start": prev_end, "end": prev_end + 0.2}
+
+    return enforce_monotonic_slots(slots)
+
+
+def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
     records = lyric_line_records(lyrics_text)
     lyric_lines = [record["words"] for record in records if record["kind"] == "lyric"]
     lyric_words = [word for line in lyric_lines for word in line]
@@ -253,6 +354,13 @@ def words_with_lyrics_text(words, lyrics_text=None):
         return words, None
 
     slots = anchored_time_slots(timed_words, lyric_words)
+
+    # If anchored matching failed or produced very sparse results, fall back
+    # to segment-guided distribution which uses WhisperX's raw transcript
+    # segment boundaries as timing guardrails.
+    if not slots and transcript_segments:
+        slots = segment_guided_time_slots(transcript_segments, lyric_words)
+
     if not slots:
         return words, None
 
@@ -309,8 +417,10 @@ def timing_groups(words, max_gap=1.25, max_words=10):
     return groups
 
 
-def apply_lyrics_to_words(words, lyrics_text=None):
-    mapped_words, lyric_groups = words_with_lyrics_text(words, lyrics_text)
+def apply_lyrics_to_words(words, lyrics_text=None, transcript_segments=None):
+    mapped_words, lyric_groups = words_with_lyrics_text(
+        words, lyrics_text, transcript_segments=transcript_segments,
+    )
     if lyric_groups:
         return mapped_words, lyric_groups
     return mapped_words, timing_groups(mapped_words)
@@ -328,10 +438,13 @@ def apply_phonetics(words, original_words):
     ]
 
 
-def generate_ttml(words, lyrics_text=None, language="en", include_phonetics=False):
+def generate_ttml(words, lyrics_text=None, language="en", include_phonetics=False,
+                  transcript_segments=None):
     language = language or "en"
     original_words = words
-    words, groups = apply_lyrics_to_words(words, lyrics_text)
+    words, groups = apply_lyrics_to_words(
+        words, lyrics_text, transcript_segments=transcript_segments,
+    )
     if include_phonetics:
         words = apply_phonetics(words, original_words)
     lines = [
