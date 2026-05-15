@@ -1,0 +1,9 @@
+flask
+flask-cors
+mutagen
+lyricsgenius
+pymusixmatch
+torch
+whisperx
+indic-transliteration
+python-dotenv
