@@ -160,7 +160,6 @@ def _assign_lyrics_to_segments(segments, lyrics_text):
     return new_segments
 
 
-
 def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
           model_size="medium", aligner="whisperx"):
     """
@@ -179,7 +178,7 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
     model_size : str
         Whisper model size: "base", "small", or "medium".
     aligner : str
-        Alignment backend: "whisperx" (default) or "forced" to use the built‑in forced aligner.
+        Alignment backend: "whisperx" (default) or "forced" to use the built-in forced aligner.
     """
     # Resolve alignment backend from environment if not explicitly set
     import os
@@ -237,18 +236,18 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
     ]
 
     # ---------------------------------------------------------------------
-    # Forced‑alignment fallback
+    # Forced-alignment fallback
     # ---------------------------------------------------------------------
     if aligner != "whisperx" and lyrics_text:
-        log.info("Falling back to forced‑alignment engine: %s", aligner)
+        log.info("Falling back to forced-alignment engine: %s", aligner)
         try:
             from .forced_aligner import align_lyrics
         except Exception as exc:
             log.error("Failed to import forced_aligner: %s", exc)
             raise
-        # Use the forced aligner to get segment‑level timestamps
+        # Use the forced aligner to get segment-level timestamps
         forced_segments = align_lyrics(audio_path, lyrics_text, language=language_code)
-        # Convert segment timestamps into word‑level timestamps by even distribution
+        # Convert segment timestamps into word-level timestamps by even distribution
         words = []
         for seg in forced_segments:
             segment_words = seg["text"].split()
@@ -264,15 +263,28 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
         return {"language": language_code, "words": words, "segments": raw_segments}
 
     # ---------------------------------------------------------------------
-    # Regular Whisper‑X alignment path — with True Forced Alignment injection
-    # Replace Whisper's guessed transcript text with the actual provided lyrics
-    # before feeding into the CTC aligner. This forces the model to hunt for
-    # the exact phonemes in the lyrics rather than whatever it transcribed.
+    # Regular WhisperX alignment path — FREE TRANSCRIPTION, no lyrics injection
+    #
+    # WHY injection is disabled:
+    #   Injecting all N lyric words into Whisper's coarse segments (typically
+    #   only 5–10 segments for a 3-minute song) forces the CTC aligner to fit
+    #   100+ words into a single ~30s window. The CTC model assigns valid
+    #   timestamps to every word, but they are unnaturally compressed —
+    #   producing the "rapid flash" effect observed in testing.
+    #
+    # WHAT happens instead:
+    #   WhisperX transcribes freely → word-level CTC timestamps are naturally
+    #   spaced. Then ttml_generator.anchored_time_slots() matches the provided
+    #   lyrics to those timestamps post-hoc using SequenceMatcher on the
+    #   already-timed word stream (not on coarse segments), which correctly
+    #   handles repeated choruses because it operates on individual word
+    #   timestamps that are already monotonically increasing.
     # ---------------------------------------------------------------------
     if lyrics_text:
-        log.info("Injecting lyrics into segments via _assign_lyrics_to_segments...")
-        result["segments"] = _assign_lyrics_to_segments(result["segments"], lyrics_text)
-        log.info("Lyrics injection complete: %d segments after injection.", len(result["segments"]))
+        log.info(
+            "Skipping lyrics injection — using free transcription + post-hoc anchoring "
+            "in ttml_generator.anchored_time_slots()."
+        )
 
     align_model, metadata = whisperx.load_align_model(
         language_code=language_code,
@@ -310,7 +322,8 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
             })
 
     log.info(
-        "Alignment complete: %d/%d words have real CTC timestamps, %d missing (will be interpolated by TTML generator).",
+        "Alignment complete: %d/%d words have real CTC timestamps, %d missing "
+        "(will be interpolated by TTML generator).",
         len(words), total_ws, missing_ts,
     )
     if total_ws > 0 and missing_ts / total_ws > 0.3:

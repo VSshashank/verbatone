@@ -318,27 +318,40 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
 
     slots, matched_count = anchored_time_slots(timed_words, lyric_words)
 
-    # Quality check: detect flat interpolation.
-    # If anchored_time_slots returned results but >15% share the same duration,
-    # those are uniformly distributed gaps, not real CTC anchors.
+    # Quality check: decide whether to trust anchored timestamps or fall back
+    # to segment-guided distribution.
+    #
+    # OLD heuristic: flat_pct > 0.15 (duration uniformity)
+    # PROBLEM with free transcription: fast rap legitimately has uniform word
+    # durations (e.g. 0.12s per word at 5 words/sec). This triggered a false
+    # fallback to segment_guided even when anchors were real.
+    #
+    # NEW heuristic:
+    #   - If anchored_time_slots returned 0 anchors → fall back (too sparse)
+    #   - If match_rate >= 25% of lyric words → trust the anchors (real CTC data)
+    #   - If match_rate <  25% AND flat_pct > 50% → fall back (truly interpolated)
     used_fallback = False
+    match_rate = matched_count / max(len(lyric_words), 1)
     if slots:
         durations = [round(s["end"] - s["start"], 2) for s in slots]
         dur_counts = Counter(durations)
         most_common_count = dur_counts.most_common(1)[0][1] if dur_counts else 0
         flat_pct = most_common_count / len(slots) if slots else 0
-        if flat_pct > 0.15:
+
+        truly_flat = flat_pct > 0.50 and match_rate < 0.25
+        if truly_flat:
             log.warning(
-                "anchored_time_slots: %.0f%% of words share the same duration — FLAT INTERPOLATION detected. "
-                "Falling back to segment-guided distribution. matched=%d",
-                flat_pct * 100, matched_count,
+                "anchored_time_slots: match_rate=%.0f%% flat_pct=%.0f%% — "
+                "insufficient anchors + flat interpolation. Falling back to segment-guided.",
+                match_rate * 100, flat_pct * 100,
             )
             slots = []
             used_fallback = True
         else:
             log.info(
-                "anchored_time_slots: %d/%d words matched, flat_pct=%.1f%% — using anchored timestamps.",
-                matched_count, len(lyric_words), flat_pct * 100,
+                "anchored_time_slots: %d/%d words matched (%.0f%%), flat_pct=%.1f%% — "
+                "using anchored timestamps.",
+                matched_count, len(lyric_words), match_rate * 100, flat_pct * 100,
             )
 
     if not slots:
