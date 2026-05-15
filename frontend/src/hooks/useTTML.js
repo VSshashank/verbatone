@@ -25,6 +25,7 @@ export function useTTML(ttmlString, currentTime) {
       return;
     }
 
+    let globalWordIndex = 0;
     const parsedLines = Array.from(doc.getElementsByTagName("p")).map((paragraph, lineIndex) => {
       const wordSpans = Array.from(paragraph.getElementsByTagName("span")).filter(
         (s) => s.hasAttribute("begin"),
@@ -39,14 +40,17 @@ export function useTTML(ttmlString, currentTime) {
         const text = (primarySpan || span).textContent.trim();
         const phonetic = phoneticSpan ? phoneticSpan.textContent.trim() : null;
 
-        return {
+        const word = {
           id: `${lineIndex}-${wordIndex}`,
+          globalIndex: globalWordIndex,
           text,
           phonetic,
           start: timeToSeconds(span.getAttribute("begin")),
           end: timeToSeconds(span.getAttribute("end")),
           lineIndex,
         };
+        globalWordIndex += 1;
+        return word;
       });
 
       return {
@@ -66,15 +70,16 @@ export function useTTML(ttmlString, currentTime) {
   const activeIdx = words.findIndex(
     (word) => currentTime >= word.start && currentTime <= word.end,
   );
+  const activeWord = activeIdx >= 0 ? words[activeIdx] : null;
   const activeLine = lines.find(
     (line) => line.kind === "lyric" && currentTime >= line.start && currentTime <= line.end,
   );
-  const activeLineIdx = activeLine?.lineIndex ?? -1;
+  const activeLineIdx = activeWord?.lineIndex ?? activeLine?.lineIndex ?? -1;
 
   const hasPhonetics = useMemo(
     () => words.some((w) => w.phonetic !== null),
     [words],
   );
 
-  return { lines, words, activeIdx, activeLineIdx, hasPhonetics };
+  return { lines, words, activeIdx, activeLineIdx, activeWord, hasPhonetics };
 }

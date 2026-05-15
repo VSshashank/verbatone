@@ -5,6 +5,29 @@ from db.database import get_setting
 
 
 GENIUS_SEARCH_URL = "https://api.genius.com/search"
+TRANSLATION_MARKERS = (
+    "translation",
+    "translations",
+    "translated",
+    "english translation",
+    "romanization",
+    "romanized",
+    "traducción",
+    "traduccion",
+    "traduction",
+    "deutsche übersetzung",
+    "deutsch translation",
+    "Türkçe Çeviri".lower(),
+    "español",
+    "français",
+)
+TRANSLATION_ARTISTS = (
+    "genius english translations",
+    "genius romanizations",
+    "genius traducciones",
+    "genius deutsche übersetzungen",
+    "genius translations",
+)
 
 
 def clean_token(value):
@@ -35,6 +58,8 @@ def clean_lyrics(lyrics, title=None):
         lowered = line.lower()
 
         if index == 0 and lowered.endswith("lyrics") and title_words and title_words in compact:
+            continue
+        if lowered in {"translations", "translation", "romanization", "romanized"}:
             continue
         if lowered.startswith(("you might also like", "see ", "get tickets")):
             continue
@@ -67,23 +92,76 @@ def best_hit(hits, title, artist):
     if not hits:
         return None
 
-    wanted_artist = (artist or "").strip().lower()
-    wanted_title = re.sub(r"\s+", " ", title or "").strip().lower()
+    wanted_artist = normalize_search_text(artist)
+    wanted_title = normalize_song_title(title)
 
-    def score(hit):
+    candidates = []
+    for hit in hits:
         result = hit.get("result", {})
-        primary_artist = result.get("primary_artist", {}).get("name", "").lower()
-        full_title = result.get("full_title", "").lower()
-        score_value = 0
-        if wanted_artist and wanted_artist in primary_artist:
-            score_value += 3
-        if wanted_title and wanted_title in full_title:
-            score_value += 2
-        if result.get("url"):
-            score_value += 1
-        return score_value
+        if is_translation_result(result):
+            continue
+        score_value = score_hit(result, wanted_title, wanted_artist)
+        if score_value > 0:
+            candidates.append((score_value, result))
 
-    return sorted(hits, key=score, reverse=True)[0].get("result")
+    if not candidates:
+        return None
+
+    return sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+
+
+def normalize_search_text(value):
+    value = str(value or "").lower()
+    value = value.replace("&", " and ")
+    value = re.sub(r"[’`]", "'", value)
+    value = re.sub(r"[^a-z0-9']+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_song_title(value):
+    text = str(value or "").lower()
+    text = re.sub(r"\s*\(feat\..*?\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*\[feat\..*?\]", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*-\s*(remaster|remastered|radio edit|explicit|clean).*", "", text, flags=re.IGNORECASE)
+    return normalize_search_text(text)
+
+
+def is_translation_result(result):
+    title = normalize_search_text(result.get("title") or "")
+    full_title = normalize_search_text(result.get("full_title") or "")
+    artist = normalize_search_text(result.get("primary_artist", {}).get("name") or "")
+    url = normalize_search_text(result.get("url") or "")
+    haystack = " ".join([title, full_title, artist, url])
+    if any(marker in haystack for marker in TRANSLATION_MARKERS):
+        return True
+    return any(artist.startswith(blocked) for blocked in TRANSLATION_ARTISTS)
+
+
+def score_hit(result, wanted_title, wanted_artist):
+    title = normalize_song_title(result.get("title") or "")
+    full_title = normalize_search_text(result.get("full_title") or "")
+    artist = normalize_search_text(result.get("primary_artist", {}).get("name") or "")
+
+    score_value = 0
+    if wanted_title and title == wanted_title:
+        score_value += 8
+    elif wanted_title and (wanted_title in title or title in wanted_title):
+        score_value += 5
+    elif wanted_title and wanted_title in full_title:
+        score_value += 3
+
+    if wanted_artist:
+        if artist == wanted_artist:
+            score_value += 7
+        elif wanted_artist in artist or artist in wanted_artist:
+            score_value += 4
+        else:
+            score_value -= 5
+
+    if result.get("url"):
+        score_value += 1
+
+    return score_value
 
 
 def fetch_lyrics_result(title, artist):

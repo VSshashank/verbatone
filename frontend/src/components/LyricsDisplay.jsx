@@ -1,4 +1,4 @@
-import { FileText, Minus, Plus, RefreshCcw, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { FileText, Minus, PencilLine, Plus, RefreshCcw, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTTML } from "../hooks/useTTML.js";
 import PhoneticLayer from "./PhoneticLayer.jsx";
@@ -24,7 +24,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
-  const { lines, activeLineIdx, hasPhonetics } = useTTML(ttml, effectiveTime);
+  const { lines, activeIdx, activeLineIdx, hasPhonetics } = useTTML(ttml, effectiveTime);
 
   const isPodcast = track?.type === "podcast";
 
@@ -114,6 +114,14 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     startPolling(track.id);
   }
 
+  function openManualLyrics() {
+    setShowManual((value) => !value);
+    setError("");
+    if (!showManual && !lyricsText) {
+      setMessage(ttml ? "Paste corrected lyrics to regenerate sync." : "Paste lyrics, then align this track.");
+    }
+  }
+
   async function generateLyrics() {
     if (!track?.id) return;
     setIsWorking(true);
@@ -194,26 +202,6 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     return (effectiveTime - word.start) / duration;
   }
 
-  function lineProgress(line) {
-    const timedWords = line.words.filter((word) => word.start !== undefined && word.end !== undefined);
-    if (!timedWords.length) return 0;
-    const start = timedWords[0].start;
-    const end = timedWords[timedWords.length - 1].end;
-    if (effectiveTime <= start) return 0;
-    if (effectiveTime >= end) return 1;
-    const rawProgress = (effectiveTime - start) / Math.max(end - start, 0.001);
-    return Math.max(0, Math.min(1, rawProgress));
-  }
-
-  function lineFontSize(text) {
-    const length = text.length;
-    if (length > 92) return "1.08rem";
-    if (length > 76) return "1.2rem";
-    if (length > 60) return "1.38rem";
-    if (length > 46) return "1.62rem";
-    return "1.95rem";
-  }
-
   function renderPhoneticLine(line, isActiveLine) {
     return (
       <p
@@ -261,6 +249,31 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     );
   }
 
+  function lyricWordClass(word, isActiveLine) {
+    if (word.globalIndex < activeIdx) {
+      return "text-amber-200";
+    }
+    if (word.globalIndex === activeIdx) {
+      return "scale-[1.055]";
+    }
+    return isActiveLine ? "text-zinc-300" : "text-zinc-500";
+  }
+
+  function lyricWordStyle(word) {
+    const isActiveWord = word.globalIndex === activeIdx;
+    if (!isActiveWord) return undefined;
+    const progress = Math.round(wordProgress(word) * 1000) / 10;
+    return {
+      backgroundImage: `linear-gradient(90deg, #fef3c7 ${progress}%, #facc15 ${Math.min(
+        progress + 12,
+        100,
+      )}%, #d4d4d8 ${Math.min(progress + 12, 100)}%)`,
+      WebkitBackgroundClip: "text",
+      color: "transparent",
+      filter: "drop-shadow(0 0 10px rgba(251, 191, 36, 0.45))",
+    };
+  }
+
   if (!track) {
     return (
       <section className="min-h-[260px] rounded-md border border-zinc-800 bg-[#171a1d] p-4 text-sm text-zinc-400">
@@ -284,6 +297,17 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
             showPhonetics={showPhonetics}
             onToggle={() => setShowPhonetics((p) => !p)}
           />
+          {!isPodcast && (
+            <button
+              type="button"
+              onClick={openManualLyrics}
+              disabled={isWorking}
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-[#101214] px-3 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <PencilLine className="h-4 w-4" aria-hidden="true" />
+              <span>Paste lyrics</span>
+            </button>
+          )}
           {ttml && (
             <button
               type="button"
@@ -364,12 +388,12 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
         </div>
       )}
 
-      {showManual && !ttml && (
+      {showManual && !isPodcast && (
         <form onSubmit={handleManualSubmit} className="border-b border-zinc-800 p-4">
           <textarea
             value={lyricsText}
             onChange={(event) => setLyricsText(event.target.value)}
-            placeholder="Paste lyrics here..."
+            placeholder="Paste the exact lyrics here. Keep line breaks as you want them displayed."
             className="h-32 w-full resize-none rounded-md border border-zinc-700 bg-[#101214] px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400"
           />
           <div className="mt-3 flex justify-end">
@@ -378,7 +402,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
               disabled={isWorking}
               className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-700 bg-[#101214] px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Align lyrics
+              {ttml ? "Regenerate with pasted lyrics" : "Align lyrics"}
             </button>
           </div>
         </form>
@@ -386,7 +410,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
         {lines.length ? (
-          <div className="mx-auto max-w-full space-y-5 overflow-hidden text-center font-semibold leading-[1.55] tracking-normal">
+          <div className="mx-auto max-w-4xl space-y-5 text-center font-semibold leading-[1.65] tracking-normal">
             {lines.map((line) => {
               if (line.kind === "gap") {
                 return <div key={line.id} className="h-4" aria-hidden="true" />;
@@ -400,11 +424,8 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
                 );
               }
 
-              const text = line.text || line.words.map((word) => word.text).join(" ");
-              const progress = lineProgress(line);
               const isActiveLine = activeLineIdx === line.lineIndex;
-              const isComplete = progress >= 1;
-              const fontSize = lineFontSize(text);
+              const isComplete = line.end > 0 && effectiveTime > line.end;
 
               if (showPhonetics && line.words.some((word) => word.phonetic)) {
                 return renderPhoneticLine(line, isActiveLine);
@@ -414,34 +435,26 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
                 <p
                   key={line.id}
                   ref={isActiveLine ? activeRef : null}
-                  className={`relative mx-auto min-h-[2.85rem] max-w-full overflow-hidden whitespace-nowrap px-2 transition-all duration-500 ease-out ${
+                  className={`mx-auto max-w-full px-2 text-[1.55rem] transition-all duration-500 ease-out md:text-[1.95rem] ${
                     isActiveLine
                       ? "scale-[1.035] opacity-100"
                     : isComplete
                         ? "opacity-[0.82]"
                         : "opacity-45"
                   }`}
-                  style={{ fontSize }}
                 >
-                  <span className="inline-block whitespace-nowrap text-zinc-600/95">
-                    {text}
-                  </span>
-                  <span
-                    className="absolute inset-y-0 left-0 overflow-hidden whitespace-nowrap transition-[width] duration-200 ease-linear"
-                    style={{ width: `${Math.round(progress * 1000) / 10}%` }}
-                    aria-hidden="true"
-                  >
+                  {line.words.map((word) => (
                     <span
-                      className="inline-block whitespace-nowrap bg-gradient-to-r from-amber-100 via-yellow-300 to-orange-300 bg-clip-text px-2 text-transparent"
-                      style={{
-                        filter: isActiveLine
-                          ? "drop-shadow(0 0 14px rgba(251, 191, 36, 0.38))"
-                          : "none",
-                      }}
+                      key={word.id}
+                      className={`mr-2 inline-block align-baseline transition-[color,transform,filter] duration-200 ease-out ${lyricWordClass(
+                        word,
+                        isActiveLine,
+                      )}`}
+                      style={lyricWordStyle(word)}
                     >
-                      {text}
+                      {word.text}
                     </span>
-                  </span>
+                  ))}
                 </p>
               );
             })}
