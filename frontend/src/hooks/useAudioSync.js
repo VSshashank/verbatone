@@ -5,6 +5,7 @@ export function useAudioSync(audioRef) {
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const frameRef = useRef(null);
+  const driftRef = useRef(null); // { audioTimeAtStart, wallTimeAtStart, lastLogAt }
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -21,7 +22,27 @@ export function useAudioSync(audioRef) {
       }
     };
     const tick = () => {
-      setCurrentTime(audio.currentTime || 0);
+      const ct = audio.currentTime || 0;
+      setCurrentTime(ct);
+
+      // Drift check every 10 seconds of wall-clock time
+      if (driftRef.current && !audio.paused) {
+        const now = Date.now();
+        if (now - driftRef.current.lastLogAt >= 10_000) {
+          const wallElapsed = (now - driftRef.current.wallTimeAtStart) / 1000;
+          const audioElapsed = ct - driftRef.current.audioTimeAtStart;
+          const drift = audioElapsed - wallElapsed;
+          const driftSign = drift >= 0 ? "+" : "";
+          console.log(
+            `[AudioSync] DRIFT CHECK  audio.currentTime=${ct.toFixed(3)}s` +
+            `  wallElapsed=${wallElapsed.toFixed(2)}s  audioElapsed=${audioElapsed.toFixed(2)}s` +
+            `  drift=${driftSign}${drift.toFixed(3)}s` +
+            (Math.abs(drift) > 0.2 ? "  ⚠️ SIGNIFICANT DRIFT" : "  ✅ OK")
+          );
+          driftRef.current.lastLogAt = now;
+        }
+      }
+
       frameRef.current = audio.paused ? null : window.requestAnimationFrame(tick);
     };
     const startFrameLoop = () => {
@@ -31,6 +52,15 @@ export function useAudioSync(audioRef) {
     const markPlaying = () => {
       setIsPlaying(true);
       startFrameLoop();
+      // Drift baseline — record audio time and wall-clock time at play start
+      driftRef.current = {
+        audioTimeAtStart: audio.currentTime,
+        wallTimeAtStart: Date.now(),
+        lastLogAt: Date.now(),
+      };
+      console.log(
+        `[AudioSync] PLAY  audio.currentTime=${audio.currentTime.toFixed(3)}  wall=${Date.now()}`
+      );
     };
     const markPaused = () => {
       setIsPlaying(false);

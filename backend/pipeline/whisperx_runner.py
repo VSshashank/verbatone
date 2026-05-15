@@ -229,8 +229,16 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
         return {"language": language_code, "words": words, "segments": raw_segments}
 
     # ---------------------------------------------------------------------
-    # Regular Whisper‑X alignment path
+    # Regular Whisper‑X alignment path — with True Forced Alignment injection
+    # Replace Whisper's guessed transcript text with the actual provided lyrics
+    # before feeding into the CTC aligner. This forces the model to hunt for
+    # the exact phonemes in the lyrics rather than whatever it transcribed.
     # ---------------------------------------------------------------------
+    if lyrics_text:
+        log.info("Injecting lyrics into segments via _assign_lyrics_to_segments...")
+        result["segments"] = _assign_lyrics_to_segments(result["segments"], lyrics_text)
+        log.info("Lyrics injection complete: %d segments after injection.", len(result["segments"]))
+
     align_model, metadata = whisperx.load_align_model(
         language_code=language_code,
         device=device,
@@ -245,141 +253,39 @@ def align(audio_path, lyrics_text=None, language=None, vocals_path=None,
     )
 
     words = []
+    missing_ts = 0
+    total_ws = 0
     for segment in aligned.get("segments", []):
         for word in segment.get("words", []):
             text = str(word.get("word", "")).strip()
             start = word.get("start")
             end = word.get("end")
-            if not text or start is None or end is None:
+            total_ws += 1
+            if not text:
                 continue
+            if start is None or end is None:
+                missing_ts += 1
+                log.debug("  WORD %-20s  start=None  end=None  <- INTERPOLATED", repr(text))
+                continue
+            log.debug("  WORD %-20s  start=%.3f  end=%.3f  <- CTC aligned", repr(text), start, end)
             words.append({
                 "word": text,
                 "start": round(float(start), 3),
                 "end": round(float(end), 3),
             })
 
-    return {"language": language_code, "words": words, "segments": raw_segments}
-
-    """
-    Transcribe and align words to audio using WhisperX.
-
-    Parameters
-    ----------
-    audio_path : str
-        Path to the original audio file (used for duration and fallback).
-    lyrics_text : str, optional
-        Known lyrics text to improve alignment accuracy.
-    language : str, optional
-        Language code hint (e.g. "en", "hi").
-    vocals_path : str, optional
-        Path to isolated vocals stem from Demucs. When available, WhisperX
-        aligns against the clean vocals instead of the full mix — dramatically
-        more accurate for breathy/falsetto vocals (Pattern C fix).
-    model_size : str
-        Whisper model size: "base", "small", or "medium". Larger models are
-        slower but better at detecting soft vocals. Default is "base".
-    """
-    try:
-        import torch
-        import whisperx
-    except ImportError as exc:
-        raise RuntimeError(
-            "WhisperX dependencies are not installed. "
-            "Install them with: pip install whisperx torch"
-        ) from exc
-
-    import logging
-    log = logging.getLogger("whisperx_runner")
-    logging.basicConfig(level=logging.INFO)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
-
-    log.info("Loading Whisper model=%s device=%s", model_size, device)
-    model = whisperx.load_model(model_size, device, compute_type=compute_type)
-
-    # Pattern C: prefer vocals stem for alignment if available
-    align_source = audio_path
-    if vocals_path and os.path.exists(vocals_path):
-        align_source = vocals_path
-        log.info("Using vocals stem for alignment: %s", vocals_path)
-    else:
-        log.info("Using full mix for alignment: %s", audio_path)
-
-    audio = whisperx.load_audio(align_source)
-    result = model.transcribe(audio, language=language)
-    language_code = language or result.get("language") or "en"
-
-    raw_segments = result.get("segments", [])
     log.info(
-        "Transcription complete: %d segments detected, language=%s",
-        len(raw_segments), language_code,
+        "Alignment complete: %d/%d words have real CTC timestamps, %d missing (will be interpolated by TTML generator).",
+        len(words), total_ws, missing_ts,
     )
-    for i, seg in enumerate(raw_segments[:10]):
-        log.info(
-            "  Seg %d  [%.1fs - %.1fs]  %s",
-            i, seg.get("start", 0), seg.get("end", 0),
-            str(seg.get("text", ""))[:80],
+    if total_ws > 0 and missing_ts / total_ws > 0.3:
+        log.warning(
+            "%.0f%% of words lack CTC timestamps — alignment quality is poor. "
+            "Segment-guided fallback will activate in ttml_generator.",
+            missing_ts / total_ws * 100,
         )
 
-    # Pattern A: expand segment coverage to full audio duration
-    audio_duration = _get_audio_duration(audio_path)
-    if audio_duration:
-        result["segments"] = _expand_segment_coverage(
-            result.get("segments", []), audio_duration
-        )
-
-    # Preserve raw transcript segments — the TTML generator uses these as
-    # timing guardrails when anchor matches are sparse (common in R&B).
-    raw_segments = [
-        {
-            "start": round(float(seg.get("start", 0)), 3),
-            "end": round(float(seg.get("end", 0)), 3),
-            "text": str(seg.get("text", "")).strip(),
-        }
-        for seg in result.get("segments", [])
-        if seg.get("text", "").strip()
-    ]
-
-    # TRUE FORCED ALIGNMENT INJECTION
-    # Replace Whisper's transcribed text with the actual lyrics text before alignment.
-    if lyrics_text:
-        result["segments"] = _assign_lyrics_to_segments(result["segments"], lyrics_text)
-
-    align_model, metadata = whisperx.load_align_model(
-        language_code=language_code,
-        device=device,
-    )
-    aligned = whisperx.align(
-        result["segments"],
-        align_model,
-        metadata,
-        audio,
-        device,
-        return_char_alignments=False,
-    )
-
-    words = []
-    for segment in aligned.get("segments", []):
-        for word in segment.get("words", []):
-            text = str(word.get("word", "")).strip()
-            start = word.get("start")
-            end = word.get("end")
-            if not text or start is None or end is None:
-                continue
-            words.append(
-                {
-                    "word": text,
-                    "start": round(float(start), 3),
-                    "end": round(float(end), 3),
-                }
-            )
-
-    return {
-        "language": language_code,
-        "words": words,
-        "segments": raw_segments,
-    }
+    return {"language": language_code, "words": words, "segments": raw_segments}
 
 
 def transcribe(audio_path, language=None, model_size="medium"):

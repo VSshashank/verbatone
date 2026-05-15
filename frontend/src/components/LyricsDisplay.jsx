@@ -26,7 +26,8 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
-  const { lines, activeIdx, activeLineIdx, hasPhonetics } = useTTML(ttml, effectiveTime);
+  const { lines, activeIdx, activeLineIdx, activeWord, hasPhonetics } = useTTML(ttml, effectiveTime);
+  const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
   const isPodcast = track?.type === "podcast";
 
@@ -296,6 +297,51 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   return (
     <section className="flex min-h-[260px] flex-col rounded-md border border-zinc-800 bg-[#171a1d]">
+      {isDebugMode && (
+        <div
+          id="verbatone-debug-hud"
+          style={{
+            position: "fixed",
+            bottom: "12px",
+            right: "12px",
+            zIndex: 9999,
+            background: "rgba(0,0,0,0.88)",
+            border: "1px solid #3f6212",
+            borderRadius: "8px",
+            padding: "10px 14px",
+            fontFamily: "monospace",
+            fontSize: "11px",
+            lineHeight: "1.7",
+            color: "#d9f99d",
+            maxWidth: "320px",
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{ color: "#86efac", fontWeight: "bold", marginBottom: "4px" }}>🎵 Verbatone Debug HUD</div>
+          <div><span style={{color:"#94a3b8"}}>currentTime     </span>{currentTime.toFixed(3)}s</div>
+          <div><span style={{color:"#94a3b8"}}>effectiveTime   </span>{effectiveTime.toFixed(3)}s</div>
+          <div><span style={{color:"#94a3b8"}}>timeOffset      </span>{timeOffset.toFixed(3)}s</div>
+          <hr style={{ border: "none", borderTop: "1px solid #374151", margin: "4px 0" }} />
+          {activeWord ? (
+            <>
+              <div><span style={{color:"#94a3b8"}}>activeWord.text </span><span style={{color:"#fde68a"}}>{activeWord.text}</span></div>
+              <div><span style={{color:"#94a3b8"}}>activeWord.start</span>{activeWord.start.toFixed(3)}s</div>
+              <div><span style={{color:"#94a3b8"}}>activeWord.end  </span>{activeWord.end.toFixed(3)}s</div>
+              <div>
+                <span style={{color:"#94a3b8"}}>delta (eff-start)</span>
+                <span style={{ color: Math.abs(effectiveTime - activeWord.start) > 1.5 ? "#f87171" : "#86efac" }}>
+                  {(effectiveTime - activeWord.start).toFixed(3)}s
+                </span>
+              </div>
+            </>
+          ) : (
+            <div style={{color:"#6b7280"}}>no active word</div>
+          )}
+          <hr style={{ border: "none", borderTop: "1px solid #374151", margin: "4px 0" }} />
+          <div><span style={{color:"#94a3b8"}}>totalWords      </span>{lines.flatMap(l => l.words ?? []).length}</div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="h-4 w-4 shrink-0 text-teal-300" aria-hidden="true" />

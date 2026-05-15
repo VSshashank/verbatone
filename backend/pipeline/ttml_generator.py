@@ -252,56 +252,123 @@ def anchored_time_slots(timed_words, lyric_words):
     return enforce_monotonic_slots(slots), matched_count
 
 
+def segment_guided_time_slots(transcript_segments, lyric_words):
+    """
+    Distribute lyric words across the transcript segment time-zones.
+    Used as a fallback when anchored_time_slots has too few anchor matches
+    (common in R&B / slow tracks with soft vocals).
+    """
+    if not transcript_segments or not lyric_words:
+        return []
+
+    # Only keep segments that contain real text (not synthetic tail segments)
+    real_segments = [s for s in transcript_segments if str(s.get("text", "")).strip()]
+    if not real_segments:
+        real_segments = transcript_segments
+
+    total_words = len(lyric_words)
+    total_seg_duration = sum(
+        max(float(s.get("end", 0)) - float(s.get("start", 0)), 0.01)
+        for s in real_segments
+    )
+
+    slots = []
+    cursor = 0
+    for seg in real_segments:
+        seg_start = float(seg.get("start", 0))
+        seg_end = float(seg.get("end", seg_start + 0.1))
+        seg_dur = max(seg_end - seg_start, 0.01)
+        # Proportional word allocation
+        word_count = max(1, round(total_words * seg_dur / total_seg_duration))
+        word_count = min(word_count, total_words - cursor)
+        if cursor + word_count >= total_words:
+            word_count = total_words - cursor
+        if word_count <= 0:
+            break
+        slots.extend(distribute_slots(seg_start, seg_end, word_count))
+        cursor += word_count
+
+    # Safety: pad/trim to exact word count
+    if len(slots) < total_words:
+        last_end = slots[-1]["end"] if slots else 0
+        slots.extend(distribute_slots(last_end, last_end + (total_words - len(slots)) * 0.2, total_words - len(slots)))
+    slots = slots[:total_words]
+    return enforce_monotonic_slots(slots)
+
+
 def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
+    import logging
+    log = logging.getLogger("ttml_generator")
+
     records = lyric_line_records(lyrics_text)
     lyric_lines = [record["words"] for record in records if record["kind"] == "lyric"]
     lyric_words = [word for line in lyric_lines for word in line]
     if not lyric_words:
         return words, None
 
-    # 'words' are already aligned word objects from WhisperX (after forced alignment)
-    aligned_words = [
+    timed_words = [
         word for word in words
         if word.get("start") is not None and word.get("end") is not None
     ]
 
-    # If alignment produced fewer words than lyrics, pad with None timestamps
-    # After building mapped_words, interpolate any missing timestamps
-    # Find indices of words with valid timestamps
-    valid_indices = [i for i, w in enumerate(mapped_words) if w.get('start') is not None and w.get('end') is not None]
-    if valid_indices:
-        # Fill leading missing timestamps
-        first_valid = valid_indices[0]
-        for i in range(first_valid):
-            # Use start of first valid as both start and end
-            mapped_words[i]['start'] = mapped_words[first_valid]['start']
-            mapped_words[i]['end'] = mapped_words[first_valid]['start']
-        # Fill gaps between valid timestamps
-        for i in range(len(valid_indices) - 1):
-            start_idx = valid_indices[i]
-            end_idx = valid_indices[i + 1]
-            start_time = mapped_words[start_idx]['end']
-            end_time = mapped_words[end_idx]['start']
-            gap = end_idx - start_idx - 1
-            if gap > 0:
-                interval = (end_time - start_time) / (gap + 1)
-                for j in range(1, gap + 1):
-                    mapped_words[start_idx + j]['start'] = round(start_time + (j - 1) * interval, 3)
-                    mapped_words[start_idx + j]['end'] = round(start_time + j * interval, 3)
-        # Fill trailing missing timestamps
-        last_valid = valid_indices[-1]
-        for i in range(last_valid + 1, len(mapped_words)):
-            # Use end of last valid as both start and end
-            mapped_words[i]['start'] = mapped_words[last_valid]['end']
-            mapped_words[i]['end'] = mapped_words[last_valid]['end']
-    else:
-        # No valid timestamps at all – distribute uniformly over total duration if available
-        total_start = words[0].get('start', 0) if words else 0
-        total_end = words[-1].get('end', total_start + len(mapped_words) * 0.2) if words else total_start + len(mapped_words) * 0.2
-        duration = max(total_end - total_start, len(mapped_words) * 0.2)
-        for i in range(len(mapped_words)):
-            mapped_words[i]['start'] = round(total_start + (i / len(mapped_words)) * duration, 3)
-            mapped_words[i]['end'] = round(total_start + ((i + 1) / len(mapped_words)) * duration, 3)
+    log.info(
+        "words_with_lyrics_text: %d WhisperX words, %d lyric words, %d transcript segments",
+        len(timed_words), len(lyric_words), len(transcript_segments or []),
+    )
+
+    slots, matched_count = anchored_time_slots(timed_words, lyric_words)
+
+    # Quality check: detect flat interpolation.
+    # If anchored_time_slots returned results but >15% share the same duration,
+    # those are uniformly distributed gaps, not real CTC anchors.
+    used_fallback = False
+    if slots:
+        durations = [round(s["end"] - s["start"], 2) for s in slots]
+        dur_counts = Counter(durations)
+        most_common_count = dur_counts.most_common(1)[0][1] if dur_counts else 0
+        flat_pct = most_common_count / len(slots) if slots else 0
+        if flat_pct > 0.15:
+            log.warning(
+                "anchored_time_slots: %.0f%% of words share the same duration — FLAT INTERPOLATION detected. "
+                "Falling back to segment-guided distribution. matched=%d",
+                flat_pct * 100, matched_count,
+            )
+            slots = []
+            used_fallback = True
+        else:
+            log.info(
+                "anchored_time_slots: %d/%d words matched, flat_pct=%.1f%% — using anchored timestamps.",
+                matched_count, len(lyric_words), flat_pct * 100,
+            )
+
+    if not slots:
+        if transcript_segments:
+            log.info("Using segment_guided_time_slots with %d segments.", len(transcript_segments))
+            slots = segment_guided_time_slots(transcript_segments, lyric_words)
+        else:
+            log.warning("No transcript segments available — falling back to uniform distribution.")
+            total_start = timed_words[0].get("start", 0) if timed_words else 0
+            total_end = timed_words[-1].get("end", total_start + len(lyric_words) * 0.2) if timed_words else total_start + len(lyric_words) * 0.2
+            slots = distribute_slots(total_start, total_end, len(lyric_words))
+            slots = enforce_monotonic_slots(slots)
+
+    # Log first 5 slots for inspection
+    for i, slot in enumerate(slots[:5]):
+        source = "segment-guided" if used_fallback else "anchored"
+        log.info("  slot[%d] %s  start=%.3f  end=%.3f  word=%s",
+                 i, source, slot["start"], slot["end"],
+                 lyric_words[i] if i < len(lyric_words) else "?")
+
+    # Build mapped_words by merging slots onto lyric words
+    mapped_words = []
+    for i, lyric_word in enumerate(lyric_words):
+        slot = slots[i] if i < len(slots) else {"start": 0, "end": 0}
+        mapped_words.append({
+            "word": lyric_word,
+            "start": slot["start"],
+            "end": slot["end"],
+        })
+
     # Build groups matching original lyric structure
     groups = []
     cursor = 0
@@ -317,6 +384,7 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
         cursor += count
 
     return mapped_words, groups
+
 
 
 def timing_groups(words, max_gap=1.25, max_words=10):
