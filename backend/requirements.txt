@@ -7,3 +7,4 @@ torch
 whisperx
 indic-transliteration
 python-dotenv
+requests

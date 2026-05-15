@@ -26,8 +26,8 @@ from db.database import (
     set_setting,
     update_track,
 )
-from lyrics.genius_client import fetch_lyrics as fetch_genius_lyrics
-from lyrics.musixmatch_client import fetch_lyrics as fetch_musixmatch_lyrics
+from lyrics.genius_client import fetch_lyrics_result as fetch_genius_lyrics
+from lyrics.musixmatch_client import fetch_lyrics_result as fetch_musixmatch_lyrics
 from pipeline.phonetics import romanize_words
 from pipeline.ttml_generator import generate_ttml
 from pipeline.whisperx_runner import align as align_words
@@ -183,15 +183,21 @@ def import_file_at_path(audio_path):
 
 
 def fetch_lyrics_for_track(track):
-    lyrics = fetch_genius_lyrics(track.get("title"), track.get("artist"))
-    if lyrics:
-        return lyrics, "genius"
+    errors = []
 
-    lyrics = fetch_musixmatch_lyrics(track.get("title"), track.get("artist"))
-    if lyrics:
-        return lyrics, "musixmatch"
+    genius_result = fetch_genius_lyrics(track.get("title"), track.get("artist"))
+    if genius_result.get("lyrics"):
+        return genius_result["lyrics"], "genius", errors
+    if genius_result.get("error"):
+        errors.append({"source": "genius", "message": genius_result["error"]})
 
-    return None, None
+    musixmatch_result = fetch_musixmatch_lyrics(track.get("title"), track.get("artist"))
+    if musixmatch_result.get("lyrics"):
+        return musixmatch_result["lyrics"], "musixmatch", errors
+    if musixmatch_result.get("error"):
+        errors.append({"source": "musixmatch", "message": musixmatch_result["error"]})
+
+    return None, None, errors
 
 
 def path_inside_data_dir(path):
@@ -231,13 +237,16 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
         text = (lyrics_text or "").strip()
         if not text:
             update_track(track_id, status="fetching_lyrics")
-            text, _source = fetch_lyrics_for_track(track)
+            text, _source, lyric_errors = fetch_lyrics_for_track(track)
 
         if not text:
+            error_message = "No lyrics were found. Add lyrics manually to align this track."
+            if "lyric_errors" in locals() and lyric_errors:
+                error_message = lyric_errors[0]["message"]
             update_track(track_id, status="needs_review")
             ALIGNMENT_JOBS[track_id] = {
                 "status": "needs_review",
-                "error": "No lyrics were found. Add lyrics manually to align this track.",
+                "error": error_message,
             }
             return
 
@@ -399,8 +408,11 @@ def fetch_lyrics():
     if not track:
         return jsonify({"error": "Track not found."}), 404
 
-    lyrics, source = fetch_lyrics_for_track(track)
-    return jsonify({"lyrics": lyrics, "source": source})
+    lyrics, source, errors = fetch_lyrics_for_track(track)
+    message = None
+    if not lyrics:
+        message = errors[0]["message"] if errors else "No lyrics found. Paste lyrics manually to align this track."
+    return jsonify({"lyrics": lyrics, "source": source, "errors": errors, "message": message})
 
 
 @app.route("/api/align", methods=["POST"])
@@ -570,9 +582,9 @@ def get_settings():
 def save_settings():
     payload = request.get_json(silent=True) or {}
     if "genius_token" in payload:
-        set_setting("genius_token", payload["genius_token"])
+        set_setting("genius_token", str(payload["genius_token"]).strip())
     if "musixmatch_key" in payload:
-        set_setting("musixmatch_key", payload["musixmatch_key"])
+        set_setting("musixmatch_key", str(payload["musixmatch_key"]).strip())
     return jsonify({"ok": True})
 
 

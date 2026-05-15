@@ -16,14 +16,16 @@ function SettingsPanel({ onClose }) {
   const [musixmatchKey, setMusixmatchKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
 
   async function handleSave() {
     setSaving(true);
     setSaved(false);
+    setError("");
     try {
       const payload = {};
-      if (geniusToken) payload.genius_token = geniusToken;
-      if (musixmatchKey) payload.musixmatch_key = musixmatchKey;
+      if (geniusToken.trim()) payload.genius_token = geniusToken.trim();
+      if (musixmatchKey.trim()) payload.musixmatch_key = musixmatchKey.trim();
       await fetchJson("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -32,8 +34,8 @@ function SettingsPanel({ onClose }) {
       setSaved(true);
       setGeniusToken("");
       setMusixmatchKey("");
-    } catch {
-      /* ignore */
+    } catch (err) {
+      setError(err.message);
     } finally {
       setSaving(false);
     }
@@ -53,13 +55,13 @@ function SettingsPanel({ onClose }) {
           </button>
         </div>
         <p className="mt-1 text-xs text-zinc-400">
-          API keys are stored locally in SQLite — never sent to the cloud.
+          API keys are stored locally in SQLite. For Genius, paste the Client Access Token, not the Client ID or secret.
         </p>
 
         <div className="mt-5 space-y-4">
           <div>
             <label className="block text-sm font-medium text-zinc-300" htmlFor="genius-token">
-              Genius API Token
+              Genius Client Access Token
             </label>
             <input
               id="genius-token"
@@ -98,7 +100,10 @@ function SettingsPanel({ onClose }) {
           {saved && (
             <span className="text-sm text-teal-300">Saved ✓</span>
           )}
-          {!saved && <span />}
+          {error && (
+            <span className="text-sm text-rose-300">{error}</span>
+          )}
+          {!saved && !error && <span />}
           <button
             type="button"
             onClick={handleSave}

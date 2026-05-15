@@ -124,10 +124,11 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
       if (result.lyrics) {
         setLyricsText(result.lyrics);
         setShowManual(true);
+        setMessage(`Lyrics found${result.source ? ` from ${result.source}` : ""}. Syncing now...`);
         await alignWithLyrics(result.lyrics);
       } else {
         setShowManual(true);
-        setMessage("No lyrics found. Paste lyrics below to align this track.");
+        setMessage(result.message || "No lyrics found. Paste lyrics below to align this track.");
         setIsWorking(false);
       }
     } catch (err) {

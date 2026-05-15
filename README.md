@@ -31,5 +31,7 @@ The frontend proxies `/api` to `http://127.0.0.1:5051` by default. Override it w
 - Local audio files, generated TTML, cover art, and the SQLite database live under
   `backend/data/` and are intentionally not committed.
 - Lyrics can be generated with provider keys or pasted manually, then synced.
+- Genius lyrics fetching needs a Client Access Token. A Client ID or Client
+  Secret will be rejected by the API.
 - Existing synced lyrics should be regenerated after lyric-format changes to get
   the newest line preservation and smoother karaoke rendering.
