@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from html import escape
 
@@ -355,11 +356,23 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
 
     slots = anchored_time_slots(timed_words, lyric_words)
 
-    # If anchored matching failed or produced very sparse results, fall back
-    # to segment-guided distribution which uses WhisperX's raw transcript
-    # segment boundaries as timing guardrails.
-    if not slots and transcript_segments:
-        slots = segment_guided_time_slots(transcript_segments, lyric_words)
+    # Quality check: detect when anchored_time_slots produced sparse results.
+    # When anchors are sparse, distribute_slots fills gaps with uniform-duration
+    # words (e.g. all exactly 1.62s).  If >15% of words share the same duration
+    # (rounded to 2 decimals), the result is too flat and we should prefer
+    # segment-guided distribution.
+    use_segment_guided = not slots
+    if slots and transcript_segments and len(slots) > 10:
+        durations = [round(s["end"] - s["start"], 2) for s in slots]
+        duration_counts = Counter(durations)
+        most_common_count = duration_counts.most_common(1)[0][1]
+        if most_common_count > len(slots) * 0.15:
+            use_segment_guided = True
+
+    if use_segment_guided and transcript_segments:
+        guided = segment_guided_time_slots(transcript_segments, lyric_words)
+        if guided:
+            slots = guided
 
     if not slots:
         return words, None
