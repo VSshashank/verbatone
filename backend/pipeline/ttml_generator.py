@@ -143,7 +143,13 @@ def normalized_token(value):
     return re.sub(r"[^\w']+", "", str(value or "").lower(), flags=re.UNICODE).strip("_'")
 
 
-def enforce_monotonic_slots(slots, min_duration=0.01):
+def enforce_monotonic_slots(slots, min_duration=0.08):
+    """Ensure all slots are strictly monotonic and have a perceptible minimum duration.
+
+    0.08s = 80ms minimum — a rAF tick at 60fps is ~16ms, so 10ms words are
+    invisible (currentTime jumps over them). 80ms ensures at least 4-5 frames
+    of highlight per word, which is the minimum the eye can perceive.
+    """
     cleaned = []
     cursor = 0.0
     for slot in slots:
@@ -154,7 +160,7 @@ def enforce_monotonic_slots(slots, min_duration=0.01):
     return cleaned
 
 
-def distribute_slots(start, end, count, min_duration=0.01):
+def distribute_slots(start, end, count, min_duration=0.08):
     if count <= 0:
         return []
 
@@ -206,8 +212,9 @@ def anchored_time_slots(timed_words, lyric_words):
                 }
                 matched_count += 1
         elif tag == "replace":
-            # Preserve Whisper's rhythm for mismatched text (e.g. spelling differences or hallucinations)
-            # rather than blindly flattening the timings.
+            # Preserve Whisper's rhythm for mismatched text (e.g. contractions,
+            # spelling differences, slang). Count these toward matched_count so
+            # 'Driftin'' vs 'drifting' doesn't leave an unanchored gap.
             target_count = lyric_end - lyric_start
             t_chunk = [
                 timed_words[transcript_pairs[i][0]]
@@ -219,6 +226,7 @@ def anchored_time_slots(timed_words, lyric_words):
                 if resampled and len(resampled) == target_count:
                     for offset, slot in enumerate(resampled):
                         anchors[lyric_start + offset] = slot
+                    matched_count += target_count  # count replace matches too
 
     minimum_matches = min(6, max(2, len(lyric_words) // 8))
     if matched_count < minimum_matches:
@@ -296,7 +304,7 @@ def segment_guided_time_slots(transcript_segments, lyric_words):
     return enforce_monotonic_slots(slots)
 
 
-def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
+def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is_indic=False):
     import logging
     log = logging.getLogger("ttml_generator")
 
@@ -318,18 +326,6 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
 
     slots, matched_count = anchored_time_slots(timed_words, lyric_words)
 
-    # Quality check: decide whether to trust anchored timestamps or fall back
-    # to segment-guided distribution.
-    #
-    # OLD heuristic: flat_pct > 0.15 (duration uniformity)
-    # PROBLEM with free transcription: fast rap legitimately has uniform word
-    # durations (e.g. 0.12s per word at 5 words/sec). This triggered a false
-    # fallback to segment_guided even when anchors were real.
-    #
-    # NEW heuristic:
-    #   - If anchored_time_slots returned 0 anchors → fall back (too sparse)
-    #   - If match_rate >= 25% of lyric words → trust the anchors (real CTC data)
-    #   - If match_rate <  25% AND flat_pct > 50% → fall back (truly interpolated)
     used_fallback = False
     match_rate = matched_count / max(len(lyric_words), 1)
     if slots:
@@ -354,6 +350,17 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
                 matched_count, len(lyric_words), match_rate * 100, flat_pct * 100,
             )
 
+    # 6d: Indian language tracks with poor CTC alignment (<40% match) —
+    # fall back to line-level sync by distributing words evenly within each
+    # lyric line's segment boundary. Much better UX than random word flashes.
+    if is_indic and match_rate < 0.40 and transcript_segments:
+        log.info(
+            "Indian language track with low match rate (%.0f%%) — using line-level sync.",
+            match_rate * 100,
+        )
+        slots = _line_level_slots(records, transcript_segments, lyric_words)
+        used_fallback = True
+
     if not slots:
         if transcript_segments:
             log.info("Using segment_guided_time_slots with %d segments.", len(transcript_segments))
@@ -372,7 +379,7 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
                  i, source, slot["start"], slot["end"],
                  lyric_words[i] if i < len(lyric_words) else "?")
 
-    # Build mapped_words by merging slots onto lyric words
+    # Build mapped_words
     mapped_words = []
     for i, lyric_word in enumerate(lyric_words):
         slot = slots[i] if i < len(slots) else {"start": 0, "end": 0}
@@ -390,10 +397,7 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None):
             groups.append({**record, "words": []})
             continue
         count = len(record["words"])
-        groups.append({
-            **record,
-            "words": mapped_words[cursor:cursor + count],
-        })
+        groups.append({**record, "words": mapped_words[cursor:cursor + count]})
         cursor += count
 
     return mapped_words, groups
@@ -427,9 +431,49 @@ def timing_groups(words, max_gap=1.25, max_words=10):
     return groups
 
 
-def apply_lyrics_to_words(words, lyrics_text=None, transcript_segments=None):
+def _line_level_slots(records, transcript_segments, lyric_words):
+    """
+    Line-level sync fallback for Indian language tracks (Task 6d).
+
+    Distributes words evenly within each lyric line's time window.
+    Line windows are derived from transcript_segments by proportionally
+    splitting the total segment time across lyric lines by word count.
+    """
+    lyric_line_records_only = [r for r in records if r["kind"] == "lyric"]
+    if not lyric_line_records_only or not transcript_segments:
+        return []
+
+    total_duration = sum(
+        max(float(s.get("end", 0)) - float(s.get("start", 0)), 0.01)
+        for s in transcript_segments
+    ) or 1.0
+    audio_start = float(transcript_segments[0].get("start", 0))
+    audio_end = float(transcript_segments[-1].get("end", audio_start + total_duration))
+    total_span = max(audio_end - audio_start, 1.0)
+
+    total_lyric_words = len(lyric_words)
+    slots = []
+    cursor = 0.0
+    accumulated = audio_start
+
+    for line_record in lyric_line_records_only:
+        line_word_count = len(line_record["words"])
+        if line_word_count == 0:
+            continue
+        # Each line gets a share of the total span proportional to its word count
+        line_share = line_word_count / max(total_lyric_words, 1)
+        line_duration = total_span * line_share
+        line_start = accumulated
+        line_end = accumulated + line_duration
+        slots.extend(distribute_slots(line_start, line_end, line_word_count))
+        accumulated = line_end
+
+    return enforce_monotonic_slots(slots)
+
+
+def apply_lyrics_to_words(words, lyrics_text=None, transcript_segments=None, is_indic=False):
     mapped_words, lyric_groups = words_with_lyrics_text(
-        words, lyrics_text, transcript_segments=transcript_segments,
+        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic,
     )
     if lyric_groups:
         return mapped_words, lyric_groups
@@ -449,11 +493,11 @@ def apply_phonetics(words, original_words):
 
 
 def generate_ttml(words, lyrics_text=None, language="en", include_phonetics=False,
-                  transcript_segments=None):
+                  transcript_segments=None, is_indic=False):
     language = language or "en"
     original_words = words
     words, groups = apply_lyrics_to_words(
-        words, lyrics_text, transcript_segments=transcript_segments,
+        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic,
     )
     if include_phonetics:
         words = apply_phonetics(words, original_words)

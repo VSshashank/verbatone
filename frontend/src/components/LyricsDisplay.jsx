@@ -26,7 +26,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
-  const { lines, activeIdx, activeLineIdx, activeWord, hasPhonetics } = useTTML(ttml, effectiveTime);
+  const { lines, activeIdx, activeLineIdx, activeWord, hasPhonetics, syncSource } = useTTML(ttml, effectiveTime);
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
   const isPodcast = track?.type === "podcast";
@@ -132,6 +132,12 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     setMessage("Looking for lyrics...");
     try {
       const result = await fetchJson(`/api/lyrics/fetch?track_id=${track.id}`);
+      // LRCLIB returned perfect sync — alignment already started in background
+      if (result.status === "lrclib_synced") {
+        setMessage("✦ Perfect sync found — applying now...");
+        startPolling(track.id);
+        return;
+      }
       if (result.lyrics) {
         setLyricsText(result.lyrics);
         setShowManual(true);
@@ -348,6 +354,14 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
           <h3 className="truncate text-sm font-semibold text-zinc-100">
             {isPodcast ? "Synced subtitles" : "Synced lyrics"}
           </h3>
+          {syncSource === "lrclib" && (
+            <span
+              title="Timestamps from LRCLIB — sample-accurate line sync"
+              className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-teal-300 ring-1 ring-inset ring-teal-500/30"
+            >
+              ✦ Synced
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <PhoneticLayer

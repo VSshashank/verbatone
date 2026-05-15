@@ -11,6 +11,7 @@ function timeToSeconds(value) {
 function findActiveWordIndex(words, currentTime) {
   if (!words.length) return -1;
 
+  // 1. Exact bracket: currentTime falls within a word's visual window
   const exactIndex = words.findIndex((word, index) => {
     const start = word.visualStart ?? word.start;
     const end = word.visualEnd ?? word.end;
@@ -19,20 +20,31 @@ function findActiveWordIndex(words, currentTime) {
   });
   if (exactIndex >= 0) return exactIndex;
 
+  // 2. Before all words
   if (currentTime < words[0].start) return -1;
 
+  // 3. Between words — return the last-passed word when in the same line,
+  //    or -1 when crossing a line boundary (inter-line gap = intentional dim).
+  //    Also handles abutting words (end === next.start, no gap): the exact
+  //    check above handles those; this catches genuine inter-word micro-gaps.
   for (let index = 0; index < words.length - 1; index += 1) {
     const word = words[index];
     const next = words[index + 1];
     if (currentTime > word.end && currentTime < next.start) {
-      return word.lineIndex === next.lineIndex ? index : -1;
+      // Same line: keep the current word lit (handles interpolated dense sections)
+      if (word.lineIndex === next.lineIndex) return index;
+      // Cross-line gap: dim (return -1) only if the gap is intentionally large (>1s)
+      const gap = next.start - word.end;
+      return gap > 1.0 ? -1 : index;
     }
   }
 
+  // 4. After all words — keep the last word lit for 0.35s grace period
   const lastWord = words[words.length - 1];
   const lastEnd = lastWord.visualEnd ?? lastWord.end;
   return currentTime > lastEnd && currentTime - lastEnd <= 0.35 ? words.length - 1 : -1;
 }
+
 
 function addVisualTiming(lines) {
   const lyricWords = lines.flatMap((line) => line.words);
@@ -79,10 +91,12 @@ function addVisualTiming(lines) {
 
 export function useTTML(ttmlString, currentTime) {
   const [lines, setLines] = useState([]);
+  const [syncSource, setSyncSource] = useState(null);
 
   useEffect(() => {
     if (!ttmlString) {
       setLines([]);
+      setSyncSource(null);
       return;
     }
 
@@ -91,8 +105,13 @@ export function useTTML(ttmlString, currentTime) {
     const parseError = doc.querySelector("parsererror");
     if (parseError) {
       setLines([]);
+      setSyncSource(null);
       return;
     }
+
+    // Read data-sync-source from the <tt> root element
+    const ttRoot = doc.getElementsByTagName("tt")[0];
+    setSyncSource(ttRoot?.getAttribute("data-sync-source") || null);
 
     let globalWordIndex = 0;
     const parsedLines = Array.from(doc.getElementsByTagName("p")).map((paragraph, lineIndex) => {
@@ -151,5 +170,5 @@ export function useTTML(ttmlString, currentTime) {
     [words],
   );
 
-  return { lines, words, activeIdx, activeLineIdx, activeWord, hasPhonetics };
+  return { lines, words, activeIdx, activeLineIdx, activeWord, hasPhonetics, syncSource };
 }

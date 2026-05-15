@@ -11,3 +11,5 @@ requests
 demucs
 librosa
 qrcode[pil]
+langdetect
+# lrclib_client.py and lrc_to_ttml.py use only `requests` (already above)

@@ -33,6 +33,8 @@ from db.database import (
 )
 from lyrics.genius_client import fetch_lyrics_result as fetch_genius_lyrics
 from lyrics.musixmatch_client import fetch_lyrics_result as fetch_musixmatch_lyrics
+from lyrics.lrc_to_ttml import lrc_to_ttml as _lrc_to_ttml
+from lyrics.lrclib_client import fetch_synced_lyrics as _fetch_lrclib
 from pipeline.demucs_runner import separate as separate_stems
 from pipeline.phonetics import romanize_words
 from pipeline.ttml_generator import generate_ttml
@@ -60,7 +62,54 @@ KARAOKE_SUBMISSION = {
     "error": None,
     "submitted_at": None,
 }
-PHONETIC_LANGUAGES = {"hi", "kn", "ta", "te", "ml", "mr", "gu", "pa"}
+PHONETIC_LANGUAGES = {"hi", "kn", "ta", "te", "ml", "mr", "gu", "pa", "bn"}
+INDIC_SCRIPT_RANGES = [
+    (0x0900, 0x097F),  # Devanagari (hi, mr)
+    (0x0980, 0x09FF),  # Bengali
+    (0x0A00, 0x0A7F),  # Gurmukhi (pa)
+    (0x0B80, 0x0BFF),  # Tamil
+    (0x0C00, 0x0C7F),  # Telugu
+    (0x0C80, 0x0CFF),  # Kannada
+    (0x0D00, 0x0D7F),  # Malayalam
+]
+INDIC_LANG_MODEL = "large-v2"  # WhisperX model for Indian languages
+
+
+def _detect_language(text):
+    """
+    Fast language detection: checks Unicode script ranges first (reliable
+    for Indic scripts), then falls back to langdetect for Latin-script text.
+    Returns a BCP-47 code string or None.
+    """
+    if not text:
+        return None
+    sample = text[:500]
+    # Script-range detection (fast, no dependency)
+    for char in sample:
+        cp = ord(char)
+        for lo, hi in INDIC_SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                # Devanagari is used by both Hindi and Marathi — default hi
+                if 0x0900 <= cp <= 0x097F:
+                    return "hi"
+                if 0x0980 <= cp <= 0x09FF:
+                    return "bn"
+                if 0x0A00 <= cp <= 0x0A7F:
+                    return "pa"
+                if 0x0B80 <= cp <= 0x0BFF:
+                    return "ta"
+                if 0x0C00 <= cp <= 0x0C7F:
+                    return "te"
+                if 0x0C80 <= cp <= 0x0CFF:
+                    return "kn"
+                if 0x0D00 <= cp <= 0x0D7F:
+                    return "ml"
+    # Latin-script fallback via langdetect
+    try:
+        from langdetect import detect
+        return detect(sample)
+    except Exception:
+        return None
 
 app = Flask(__name__)
 CORS(app)
@@ -324,7 +373,23 @@ def run_stem_job(track_id):
         STEM_JOBS[track_id] = {"status": "error", "error": str(exc)}
 
 
+def _save_ttml(track_id, ttml_string, detected_language, needs_phonetics):
+    """Write TTML to disk and update track record. Returns updated track dict."""
+    TTML_DIR.mkdir(parents=True, exist_ok=True)
+    ttml_path = TTML_DIR / f"{track_id}.ttml"
+    ttml_path.write_text(ttml_string, encoding="utf-8")
+    return update_track(
+        track_id,
+        status="ready",
+        language=detected_language,
+        ttml_path=str(ttml_path),
+        has_phonetics=1 if needs_phonetics else 0,
+    )
+
+
 def run_alignment_job(track_id, lyrics_text=None, language=None):
+    import logging
+    log = logging.getLogger("app")
     ALIGNMENT_JOBS[track_id] = {"status": "aligning", "error": None}
     try:
         track = find_track(track_id)
@@ -333,36 +398,96 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             return
 
         text = (lyrics_text or "").strip()
-        if not text:
+        user_provided_lyrics = bool(text)
+
+        # ------------------------------------------------------------------
+        # Step 0: LRCLIB fast-path (skip if user pasted their own lyrics)
+        # ------------------------------------------------------------------
+        if not user_provided_lyrics:
             update_track(track_id, status="fetching_lyrics")
-            text, _source, lyric_errors = fetch_lyrics_for_track(track)
+            lrc = _fetch_lrclib(
+                title=track["title"],
+                artist=track.get("artist", ""),
+                album=track.get("album"),
+                duration=track.get("duration"),
+                language=language,
+            )
+            if lrc and lrc.get("synced"):
+                log.info("LRCLIB synced LRC found for %r — bypassing WhisperX", track["title"])
+                detected_language = language or _detect_language(lrc.get("plain") or lrc["synced"]) or "en"
+                needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
+                ttml_string = _lrc_to_ttml(
+                    lrc["synced"],
+                    language=detected_language,
+                    include_phonetics=needs_phonetics,
+                )
+                updated = _save_ttml(track_id, ttml_string, detected_language, needs_phonetics)
+                ALIGNMENT_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
+                return
+            elif lrc and lrc.get("plain"):
+                # Use LRCLIB plain lyrics for WhisperX alignment
+                log.info("LRCLIB plain lyrics found for %r — using for WhisperX", track["title"])
+                text = lrc["plain"]
+            else:
+                # Fall through to Genius / Musixmatch
+                text, _source, lyric_errors = fetch_lyrics_for_track(track)
+        else:
+            lyric_errors = []
 
         if not text:
             error_message = "No lyrics were found. Add lyrics manually to align this track."
             if "lyric_errors" in locals() and lyric_errors:
                 error_message = lyric_errors[0]["message"]
             update_track(track_id, status="needs_review")
-            ALIGNMENT_JOBS[track_id] = {
-                "status": "needs_review",
-                "error": error_message,
-            }
+            ALIGNMENT_JOBS[track_id] = {"status": "needs_review", "error": error_message}
             return
 
-        # Pattern C: use clean vocals stem for alignment when available
+        # ------------------------------------------------------------------
+        # Step 1: Language detection (6b)
+        # ------------------------------------------------------------------
+        detected_language = language or _detect_language(text) or "en"
+        is_indic = detected_language.lower() in PHONETIC_LANGUAGES
+        model_size = INDIC_LANG_MODEL if is_indic else "medium"
+        log.info("Detected language: %s  is_indic=%s  model=%s", detected_language, is_indic, model_size)
+
+        # ------------------------------------------------------------------
+        # Step 2: Auto-Demucs for Indian language tracks (6e)
+        # ------------------------------------------------------------------
         vocals_path = track.get("vocals_path")
         if vocals_path and not os.path.exists(vocals_path):
             vocals_path = None
 
+        if is_indic and not vocals_path:
+            log.info("Indian language track — auto-separating vocals with Demucs")
+            update_track(track_id, status="aligning")  # frontend shows "Aligning..."
+            try:
+                output_dir = STEMS_DIR / track_id
+                stems = separate_stems(track["path"], output_dir)
+                vocals_path = stems["vocals"]
+                update_track(
+                    track_id,
+                    vocals_path=vocals_path,
+                    instrumental_path=stems["no_vocals"],
+                )
+                log.info("Demucs complete: vocals at %s", vocals_path)
+            except Exception as demucs_exc:
+                log.warning("Auto-Demucs failed: %s — continuing with full mix", demucs_exc)
+                vocals_path = None
+
+        # ------------------------------------------------------------------
+        # Step 3: WhisperX alignment
+        # ------------------------------------------------------------------
         update_track(track_id, status="aligning")
         result = align_words(
             track["path"],
             lyrics_text=text,
-            language=language,
+            language=detected_language,
             vocals_path=vocals_path,
+            model_size=model_size,
         )
         words = result.get("words", [])
         transcript_segments = result.get("segments", [])
-        detected_language = result.get("language") or language
+        detected_language = result.get("language") or detected_language
         if not words:
             update_track(track_id, status="needs_review", language=detected_language)
             ALIGNMENT_JOBS[track_id] = {
@@ -371,30 +496,19 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             }
             return
 
-        # Phonetic romanization for supported Indic languages
-        needs_phonetics = (detected_language or "").lower() in PHONETIC_LANGUAGES
+        needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
         if needs_phonetics:
             words = romanize_words(words, detected_language)
 
-        TTML_DIR.mkdir(parents=True, exist_ok=True)
-        ttml_path = TTML_DIR / f"{track_id}.ttml"
-        ttml_path.write_text(
-            generate_ttml(
-                words,
-                lyrics_text=text,
-                language=detected_language,
-                include_phonetics=needs_phonetics,
-                transcript_segments=transcript_segments,
-            ),
-            encoding="utf-8",
-        )
-        updated = update_track(
-            track_id,
-            status="ready",
+        ttml_string = generate_ttml(
+            words,
+            lyrics_text=text,
             language=detected_language,
-            ttml_path=str(ttml_path),
-            has_phonetics=1 if needs_phonetics else 0,
+            include_phonetics=needs_phonetics,
+            transcript_segments=transcript_segments,
+            is_indic=is_indic,
         )
+        updated = _save_ttml(track_id, ttml_string, detected_language, needs_phonetics)
         ALIGNMENT_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
     except Exception as exc:
         update_track(track_id, status="needs_review")
@@ -518,6 +632,40 @@ def fetch_lyrics():
     if not track:
         return jsonify({"error": "Track not found."}), 404
 
+    # Step 0: try LRCLIB first
+    lrc = _fetch_lrclib(
+        title=track["title"],
+        artist=track.get("artist", ""),
+        album=track.get("album"),
+        duration=track.get("duration"),
+    )
+    if lrc and lrc.get("synced"):
+        # Synced LRC available — start background alignment job immediately
+        update_track(track_id, status="aligning")
+        thread = threading.Thread(
+            target=run_alignment_job,
+            args=(track_id, None, None),
+            daemon=True,
+        )
+        thread.start()
+        return jsonify({
+            "lyrics": None,
+            "source": "lrclib",
+            "status": "lrclib_synced",
+            "message": "Perfect sync found on LRCLIB — applying now",
+            "errors": [],
+        })
+    if lrc and lrc.get("plain"):
+        # Plain lyrics from LRCLIB — return them for manual/WhisperX flow
+        return jsonify({
+            "lyrics": lrc["plain"],
+            "source": "lrclib",
+            "status": "plain",
+            "errors": [],
+            "message": None,
+        })
+
+    # Fall through to Genius / Musixmatch
     lyrics, source, errors = fetch_lyrics_for_track(track)
     message = None
     if not lyrics:
