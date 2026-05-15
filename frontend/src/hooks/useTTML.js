@@ -66,8 +66,10 @@ export function useTTML(ttmlString, currentTime) {
   const activeIdx = words.findIndex(
     (word) => currentTime >= word.start && currentTime <= word.end,
   );
-  const activeWord = activeIdx >= 0 ? words[activeIdx] : null;
-  const activeLineIdx = activeWord?.lineIndex ?? -1;
+  const activeLine = lines.find(
+    (line) => line.kind === "lyric" && currentTime >= line.start && currentTime <= line.end,
+  );
+  const activeLineIdx = activeLine?.lineIndex ?? -1;
 
   const hasPhonetics = useMemo(
     () => words.some((w) => w.phonetic !== null),

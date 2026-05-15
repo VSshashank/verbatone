@@ -120,7 +120,6 @@ def fetch_lyrics_result(title, artist):
             remove_section_headers=False,
             skip_non_songs=True,
             timeout=12,
-            verbose=False,
         )
         lyrics = genius.lyrics(song_url=hit.get("url"))
         cleaned = clean_lyrics(lyrics, title=title)

@@ -24,7 +24,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
-  const { lines, activeIdx, activeLineIdx, hasPhonetics } = useTTML(ttml, effectiveTime);
+  const { lines, activeLineIdx, hasPhonetics } = useTTML(ttml, effectiveTime);
 
   const isPodcast = track?.type === "podcast";
 
@@ -53,7 +53,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     if (activeRef.current) {
       activeRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
     }
-  }, [activeIdx]);
+  }, [activeLineIdx]);
 
   async function loadTtml(trackId) {
     try {

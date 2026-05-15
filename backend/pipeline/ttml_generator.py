@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 from html import escape
 
 
@@ -137,6 +138,106 @@ def resampled_time_slots(timed_words, target_count):
     return slots
 
 
+def normalized_token(value):
+    return re.sub(r"[^a-z0-9']+", "", str(value or "").lower()).strip("'")
+
+
+def enforce_monotonic_slots(slots, min_duration=0.08):
+    cleaned = []
+    cursor = 0.0
+    for slot in slots:
+        start = max(float(slot.get("start", cursor)), cursor)
+        end = max(float(slot.get("end", start + min_duration)), start + min_duration)
+        cleaned.append({"start": round(start, 3), "end": round(end, 3)})
+        cursor = end
+    return cleaned
+
+
+def distribute_slots(start, end, count, min_duration=0.08):
+    if count <= 0:
+        return []
+
+    start = float(start)
+    end = max(float(end), start + count * min_duration)
+    duration = end - start
+    return [
+        {
+            "start": round(start + (index / count) * duration, 3),
+            "end": round(start + ((index + 1) / count) * duration, 3),
+        }
+        for index in range(count)
+    ]
+
+
+def anchored_time_slots(timed_words, lyric_words):
+    """
+    Match transcript words to lyric words and interpolate only the gaps.
+    This keeps copied lyric lines intact without blindly stretching the entire
+    lyric sheet over every Whisper word when the transcription differs.
+    """
+    if not timed_words or not lyric_words:
+        return []
+
+    transcript_pairs = [
+        (index, normalized_token(word.get("word")))
+        for index, word in enumerate(timed_words)
+    ]
+    transcript_pairs = [(index, token) for index, token in transcript_pairs if token]
+    transcript_tokens = [token for _index, token in transcript_pairs]
+    lyric_tokens = [normalized_token(word) for word in lyric_words]
+
+    if not transcript_tokens:
+        return resampled_time_slots(timed_words, len(lyric_words))
+
+    anchors = [None] * len(lyric_words)
+    matcher = SequenceMatcher(None, transcript_tokens, lyric_tokens, autojunk=False)
+    matched_count = 0
+
+    for tag, transcript_start, _transcript_end, lyric_start, lyric_end in matcher.get_opcodes():
+        if tag != "equal":
+            continue
+        for offset, lyric_index in enumerate(range(lyric_start, lyric_end)):
+            pair_index = min(transcript_start + offset, len(transcript_pairs) - 1)
+            transcript_index = transcript_pairs[pair_index][0]
+            timed_word = timed_words[transcript_index]
+            anchors[lyric_index] = {
+                "start": float(timed_word.get("start", 0)),
+                "end": float(timed_word.get("end", timed_word.get("start", 0) + 0.12)),
+            }
+            matched_count += 1
+
+    minimum_matches = min(6, max(2, len(lyric_words) // 8))
+    if matched_count < minimum_matches:
+        return resampled_time_slots(timed_words, len(lyric_words))
+
+    total_start = float(timed_words[0].get("start", 0))
+    total_end = float(timed_words[-1].get("end", total_start + len(lyric_words) * 0.16))
+    slots = [None] * len(lyric_words)
+    anchor_indexes = [index for index, anchor in enumerate(anchors) if anchor]
+
+    for index in anchor_indexes:
+        slots[index] = anchors[index]
+
+    first_anchor = anchor_indexes[0]
+    for index, slot in enumerate(distribute_slots(total_start, slots[first_anchor]["start"], first_anchor)):
+        slots[index] = slot
+
+    for left, right in zip(anchor_indexes, anchor_indexes[1:]):
+        gap_count = right - left - 1
+        if gap_count <= 0:
+            continue
+        gap_slots = distribute_slots(slots[left]["end"], slots[right]["start"], gap_count)
+        for offset, slot in enumerate(gap_slots, start=1):
+            slots[left + offset] = slot
+
+    last_anchor = anchor_indexes[-1]
+    tail_count = len(lyric_words) - last_anchor - 1
+    for offset, slot in enumerate(distribute_slots(slots[last_anchor]["end"], total_end, tail_count), start=1):
+        slots[last_anchor + offset] = slot
+
+    return enforce_monotonic_slots(slots)
+
+
 def words_with_lyrics_text(words, lyrics_text=None):
     records = lyric_line_records(lyrics_text)
     lyric_lines = [record["words"] for record in records if record["kind"] == "lyric"]
@@ -160,7 +261,7 @@ def words_with_lyrics_text(words, lyrics_text=None):
             for index, word in enumerate(timed_words)
         ]
     else:
-        slots = resampled_time_slots(timed_words, len(lyric_words))
+        slots = anchored_time_slots(timed_words, lyric_words)
         mapped_words = [
             {
                 **slots[index],
