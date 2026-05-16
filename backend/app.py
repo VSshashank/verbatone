@@ -13,7 +13,7 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, make_response, request, send_file
 from flask_cors import CORS
 from mutagen import File as MutagenFile
 from werkzeug.utils import secure_filename
@@ -34,11 +34,14 @@ from db.database import (
 from lyrics.genius_client import fetch_lyrics_result as fetch_genius_lyrics
 from lyrics.musixmatch_client import fetch_lyrics_result as fetch_musixmatch_lyrics
 from lyrics.lrc_to_ttml import lrc_to_ttml as _lrc_to_ttml
+from lyrics.lrc_to_ttml import merged_lines_to_ttml
+from lyrics.lrc_to_ttml import parse_lrc_to_lines
+from lyrics.lyrics_merger import merge_genius_lrclib
 from lyrics.lrclib_client import fetch_synced_lyrics as _fetch_lrclib
 from pipeline.demucs_runner import separate as separate_stems
 from pipeline.phonetics import romanize_words
 from pipeline.ttml_generator import generate_ttml
-from pipeline.whisperx_runner import align as align_words
+from pipeline.stable_ts_runner import align as align_words
 from pipeline.whisperx_runner import transcribe as transcribe_words
 from scoring.karaoke_scorer import score as score_karaoke
 
@@ -51,6 +54,7 @@ COVERS_DIR = DATA_DIR / "covers"
 STEMS_DIR = DATA_DIR / "stems"
 KARAOKE_DIR = DATA_DIR / "karaoke"
 BACKEND_PORT = int(os.environ.get("VERBATONE_BACKEND_PORT", "5051"))
+FRONTEND_PORT = int(os.environ.get("VERBATONE_FRONTEND_PORT", "5173"))
 ALIGNMENT_JOBS = {}
 STEM_JOBS = {}
 KARAOKE_SUBMISSION = {
@@ -112,7 +116,14 @@ def _detect_language(text):
         return None
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5173",
+    "https://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://127.0.0.1:5173",
+    r"https?://192\.168\.\d{1,3}\.\d{1,3}:5173",
+    r"https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:5173",
+])
 init_db()
 
 
@@ -238,11 +249,12 @@ def safe_upload_relative_path(filename):
     return Path(*parts)
 
 
-def import_file_at_path(audio_path):
+def import_file_at_path(audio_path, skip_exists_check=False):
     audio_path_string = str(audio_path)
-    existing = find_track_by_path(audio_path_string)
-    if existing:
-        return None, {"path": audio_path_string, "reason": "already_imported"}, None
+    if not skip_exists_check:
+        existing = find_track_by_path(audio_path_string)
+        if existing:
+            return None, {"path": audio_path_string, "reason": "already_imported"}, None
 
     try:
         return insert_track(metadata_for_file(audio_path_string)), None, None
@@ -387,7 +399,49 @@ def _save_ttml(track_id, ttml_string, detected_language, needs_phonetics):
     )
 
 
-def run_alignment_job(track_id, lyrics_text=None, language=None):
+def _ttml_from_lrclib_synced(track, lrc, language=None):
+    """Build line-level TTML from LRCLIB, optionally merging Genius lyric text."""
+    import logging
+    log = logging.getLogger("app")
+
+    detected_language = language or _detect_language(lrc.get("plain") or lrc["synced"]) or "en"
+    needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
+
+    genius_result = fetch_genius_lyrics(track["title"], track.get("artist", ""))
+    genius_text = genius_result.get("lyrics")
+
+    if genius_text:
+        merged = merge_genius_lrclib(genius_text, lrc["synced"])
+        if merged["match_rate"] < 0.30:
+            log.warning(
+                "lyrics_merger: match rate %.0f%% < 30%% — falling back to LRCLIB-only",
+                merged["match_rate"] * 100,
+            )
+            ttml_string = _lrc_to_ttml(
+                lrc["synced"],
+                language=detected_language,
+                include_phonetics=needs_phonetics,
+            )
+            log.info("lyrics_merger: using LRCLIB text+timestamps only")
+        else:
+            ttml_string = merged_lines_to_ttml(
+                merged["lines"],
+                language=detected_language,
+                include_phonetics=needs_phonetics,
+            )
+            log.info("lyrics_merger: using Genius text + LRCLIB timestamps")
+    else:
+        ttml_string = _lrc_to_ttml(
+            lrc["synced"],
+            language=detected_language,
+            include_phonetics=needs_phonetics,
+        )
+        log.info("lyrics_merger: Genius unavailable, using LRCLIB text+timestamps only")
+
+    return ttml_string, detected_language, needs_phonetics
+
+
+def run_alignment_job(track_id, lyrics_text=None, language=None, lrc_prefetch=None):
     import logging
     log = logging.getLogger("app")
     ALIGNMENT_JOBS[track_id] = {"status": "aligning", "error": None}
@@ -399,37 +453,40 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
 
         text = (lyrics_text or "").strip()
         user_provided_lyrics = bool(text)
+        lrc = None
+        lrc_lines_for_hybrid = None
 
         # ------------------------------------------------------------------
-        # Step 0: LRCLIB fast-path (skip if user pasted their own lyrics)
+        # Step 0: LRCLIB (skip fetch if user pasted their own lyrics)
         # ------------------------------------------------------------------
         if not user_provided_lyrics:
             update_track(track_id, status="fetching_lyrics")
-            lrc = _fetch_lrclib(
-                title=track["title"],
-                artist=track.get("artist", ""),
-                album=track.get("album"),
-                duration=track.get("duration"),
-                language=language,
-            )
-            if lrc and lrc.get("synced"):
-                log.info("LRCLIB synced LRC found for %r — bypassing WhisperX", track["title"])
-                detected_language = language or _detect_language(lrc.get("plain") or lrc["synced"]) or "en"
-                needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
-                ttml_string = _lrc_to_ttml(
-                    lrc["synced"],
-                    language=detected_language,
-                    include_phonetics=needs_phonetics,
-                )
-                updated = _save_ttml(track_id, ttml_string, detected_language, needs_phonetics)
-                ALIGNMENT_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
-                return
-            elif lrc and lrc.get("plain"):
-                # Use LRCLIB plain lyrics for WhisperX alignment
-                log.info("LRCLIB plain lyrics found for %r — using for WhisperX", track["title"])
-                text = lrc["plain"]
+            if lrc_prefetch:
+                lrc = lrc_prefetch
+                log.info("hybrid: lrc_prefetch provided, skipping LRCLIB network call")
             else:
-                # Fall through to Genius / Musixmatch
+                lrc = _fetch_lrclib(
+                    title=track["title"],
+                    artist=track.get("artist", ""),
+                    album=track.get("album"),
+                    duration=track.get("duration"),
+                    language=language,
+                )
+            if lrc and lrc.get("synced"):
+                log.info(
+                    "LRCLIB synced found for %r — will use as anchor for hybrid alignment",
+                    track["title"],
+                )
+                lrc_lines_for_hybrid = parse_lrc_to_lines(lrc["synced"])
+                if not text:
+                    text = (lrc.get("plain") or "").strip() or "\n".join(
+                        line["text"] for line in lrc_lines_for_hybrid
+                    )
+            elif lrc and lrc.get("plain"):
+                log.info("LRCLIB plain lyrics found for %r — using for stable-ts", track["title"])
+                text = lrc["plain"]
+                lrc_lines_for_hybrid = None
+            else:
                 text, _source, lyric_errors = fetch_lyrics_for_track(track)
         else:
             lyric_errors = []
@@ -475,7 +532,7 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
                 vocals_path = None
 
         # ------------------------------------------------------------------
-        # Step 3: WhisperX alignment
+        # Step 3: stable-ts alignment
         # ------------------------------------------------------------------
         update_track(track_id, status="aligning")
         result = align_words(
@@ -488,7 +545,22 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
         words = result.get("words", [])
         transcript_segments = result.get("segments", [])
         detected_language = result.get("language") or detected_language
+        needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
+
         if not words:
+            if lrc and lrc.get("synced"):
+                log.warning(
+                    "Alignment produced no words — falling back to LRCLIB line-level TTML"
+                )
+                ttml_string = _lrc_to_ttml(
+                    lrc["synced"],
+                    language=detected_language,
+                    include_phonetics=needs_phonetics,
+                )
+                updated = _save_ttml(track_id, ttml_string, detected_language, needs_phonetics)
+                ALIGNMENT_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
+                log.info("Alignment path: lrclib-only")
+                return
             update_track(track_id, status="needs_review", language=detected_language)
             ALIGNMENT_JOBS[track_id] = {
                 "status": "needs_review",
@@ -496,7 +568,6 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             }
             return
 
-        needs_phonetics = detected_language.lower() in PHONETIC_LANGUAGES
         if needs_phonetics:
             words = romanize_words(words, detected_language)
 
@@ -507,7 +578,17 @@ def run_alignment_job(track_id, lyrics_text=None, language=None):
             include_phonetics=needs_phonetics,
             transcript_segments=transcript_segments,
             is_indic=is_indic,
+            lrc_lines=lrc_lines_for_hybrid,
         )
+        log.info(
+            "TTML generated: sync=%s  words=%d  lrc_lines=%s  genius_text=%s",
+            "hybrid" if lrc_lines_for_hybrid else "stable-ts-only",
+            len(words),
+            len(lrc_lines_for_hybrid) if lrc_lines_for_hybrid else 0,
+            bool(text and len(text) > 100),
+        )
+        alignment_path = "hybrid" if lrc_lines_for_hybrid else "stable-ts-only"
+        log.info("Alignment path: %s", alignment_path)
         updated = _save_ttml(track_id, ttml_string, detected_language, needs_phonetics)
         ALIGNMENT_JOBS[track_id] = {"status": "ready", "error": None, "track": updated}
     except Exception as exc:
@@ -609,7 +690,9 @@ def import_uploaded_audio():
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             uploaded_file.save(destination)
-            imported_track, skipped_item, error_item = import_file_at_path(destination)
+            imported_track, skipped_item, error_item = import_file_at_path(
+                destination, skip_exists_check=True,
+            )
             if imported_track:
                 imported.append(imported_track)
             if skipped_item:
@@ -640,11 +723,12 @@ def fetch_lyrics():
         duration=track.get("duration"),
     )
     if lrc and lrc.get("synced"):
-        # Synced LRC available — start background alignment job immediately
         update_track(track_id, status="aligning")
+        ALIGNMENT_JOBS[track_id] = {"status": "aligning", "error": None}
         thread = threading.Thread(
             target=run_alignment_job,
-            args=(track_id, None, None),
+            args=(track_id,),
+            kwargs={"lrc_prefetch": lrc},
             daemon=True,
         )
         thread.start()
@@ -750,7 +834,7 @@ def delete_track_route(track_id):
     if not track:
         return jsonify({"error": "Track not found."}), 404
 
-    delete_audio = request.args.get("delete_file") == "1" or path_inside_data_dir(track.get("path"))
+    delete_audio = request.args.get("delete_file") == "1"
     remove_track_artifacts(track, delete_audio=delete_audio)
     ALIGNMENT_JOBS.pop(track_id, None)
     return jsonify({"ok": True, "deleted": track_id})
@@ -796,7 +880,13 @@ def ttml(track_id):
     if not ttml_path or not os.path.exists(ttml_path):
         return jsonify({"error": "TTML has not been generated for this track."}), 404
 
-    return send_file(ttml_path, mimetype="application/ttml+xml")
+    ttml_content = Path(ttml_path).read_text(encoding="utf-8")
+    response = make_response(ttml_content)
+    response.headers["Content-Type"] = "application/xml; charset=utf-8"
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/api/debug/ttml/<track_id>", methods=["GET"])
@@ -1000,7 +1090,7 @@ def karaoke_qr():
         return jsonify({"error": "QR generation needs qrcode[pil]. Install backend requirements first."}), 500
 
     track_id = request.args.get("track_id")
-    url = f"http://{local_network_ip()}:{BACKEND_PORT}/mic"
+    url = f"https://{local_network_ip()}:{FRONTEND_PORT}/mic"
     if track_id:
         url = f"{url}?track_id={track_id}"
     img = qrcode.make(url)

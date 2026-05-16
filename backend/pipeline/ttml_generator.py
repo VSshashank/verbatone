@@ -176,6 +176,151 @@ def distribute_slots(start, end, count, min_duration=0.08):
     ]
 
 
+def _clamp_slot_to_window(slot, window_start, window_end, min_duration=0.08):
+    window_start = float(window_start)
+    window_end = float(window_end)
+    start = max(window_start, min(float(slot.get("start", window_start)), window_end - min_duration))
+    end = max(start + min_duration, min(float(slot.get("end", start + min_duration)), window_end))
+    return {"start": round(start, 3), "end": round(end, 3)}
+
+
+def _anchored_slots_in_window(timed_words, lyric_words, window_start, window_end):
+    """
+    Match transcript words to lyric words within a time window, interpolate gaps,
+    and clamp every slot to [window_start, window_end].
+    """
+    if not lyric_words:
+        return []
+
+    window_start = float(window_start)
+    window_end = float(window_end)
+
+    if not timed_words:
+        return distribute_slots(window_start, window_end, len(lyric_words))
+
+    transcript_pairs = [
+        (index, normalized_token(word.get("word")))
+        for index, word in enumerate(timed_words)
+    ]
+    transcript_pairs = [(index, token) for index, token in transcript_pairs if token]
+    transcript_tokens = [token for _index, token in transcript_pairs]
+    lyric_tokens = [normalized_token(word) for word in lyric_words]
+
+    if not transcript_tokens:
+        return distribute_slots(window_start, window_end, len(lyric_words))
+
+    anchors = [None] * len(lyric_words)
+    matcher = SequenceMatcher(None, transcript_tokens, lyric_tokens, autojunk=False)
+    matched_count = 0
+
+    for tag, transcript_start, transcript_end, lyric_start, lyric_end in matcher.get_opcodes():
+        if tag == "equal":
+            for offset, lyric_index in enumerate(range(lyric_start, lyric_end)):
+                pair_index = min(transcript_start + offset, len(transcript_pairs) - 1)
+                transcript_index = transcript_pairs[pair_index][0]
+                timed_word = timed_words[transcript_index]
+                anchors[lyric_index] = {
+                    "start": float(timed_word.get("start", 0)),
+                    "end": float(timed_word.get("end", timed_word.get("start", 0) + 0.12)),
+                }
+                matched_count += 1
+        elif tag == "replace":
+            target_count = lyric_end - lyric_start
+            t_chunk = [
+                timed_words[transcript_pairs[i][0]]
+                for i in range(transcript_start, transcript_end)
+                if i < len(transcript_pairs)
+            ]
+            if t_chunk:
+                resampled = resampled_time_slots(t_chunk, target_count)
+                if resampled and len(resampled) == target_count:
+                    for offset, slot in enumerate(resampled):
+                        anchors[lyric_start + offset] = slot
+                    matched_count += target_count
+
+    slots = [None] * len(lyric_words)
+    anchor_indexes = [index for index, anchor in enumerate(anchors) if anchor]
+
+    if not anchor_indexes:
+        slots = distribute_slots(window_start, window_end, len(lyric_words))
+        return [_clamp_slot_to_window(slot, window_start, window_end) for slot in slots]
+
+    for index in anchor_indexes:
+        slots[index] = anchors[index]
+
+    first_anchor = anchor_indexes[0]
+    for index, slot in enumerate(distribute_slots(window_start, slots[first_anchor]["start"], first_anchor)):
+        slots[index] = slot
+
+    for left, right in zip(anchor_indexes, anchor_indexes[1:]):
+        gap_count = right - left - 1
+        if gap_count <= 0:
+            continue
+        gap_slots = distribute_slots(slots[left]["end"], slots[right]["start"], gap_count)
+        for offset, slot in enumerate(gap_slots, start=1):
+            slots[left + offset] = slot
+
+    last_anchor = anchor_indexes[-1]
+    tail_count = len(lyric_words) - last_anchor - 1
+    for offset, slot in enumerate(distribute_slots(slots[last_anchor]["end"], window_end, tail_count), start=1):
+        slots[last_anchor + offset] = slot
+
+    clamped = [_clamp_slot_to_window(slot, window_start, window_end) for slot in slots]
+    return enforce_monotonic_slots(clamped)
+
+
+def lrc_constrained_time_slots(lrc_lines, whisperx_words, lyric_words):
+    """
+    Hybrid alignment: use LRC line timestamps as hard boundaries,
+    WhisperX word timestamps within each line for word-level sync.
+    """
+    if not lrc_lines or not lyric_words:
+        return []
+
+    timed_words = [
+        word for word in whisperx_words
+        if word.get("start") is not None and word.get("end") is not None
+    ]
+
+    all_slots = []
+    for line in lrc_lines:
+        line_start = float(line["start"])
+        line_end = float(line["end"])
+        line_lyric_words = line.get("lyric_words") or []
+        if not line_lyric_words:
+            continue
+
+        window_words = [
+            word for word in timed_words
+            if line_start <= float(word["start"]) <= line_end
+        ]
+        line_slots = _anchored_slots_in_window(
+            window_words, line_lyric_words, line_start, line_end,
+        )
+        all_slots.extend(line_slots)
+
+    expected = len(lyric_words)
+    if len(all_slots) < expected:
+        last_end = all_slots[-1]["end"] if all_slots else 0.0
+        all_slots.extend(
+            distribute_slots(last_end, last_end + (expected - len(all_slots)) * 0.2, expected - len(all_slots))
+        )
+    all_slots = all_slots[:expected]
+
+    all_slots = enforce_monotonic_slots(all_slots)
+
+    cursor = 0
+    for line in lrc_lines:
+        line_words = line.get("lyric_words") or []
+        window_start = float(line["start"])
+        window_end = float(line["end"])
+        for index in range(cursor, cursor + len(line_words)):
+            all_slots[index] = _clamp_slot_to_window(all_slots[index], window_start, window_end)
+        cursor += len(line_words)
+
+    return all_slots
+
+
 def anchored_time_slots(timed_words, lyric_words):
     """
     Match transcript words to lyric words and interpolate only the gaps.
@@ -212,9 +357,6 @@ def anchored_time_slots(timed_words, lyric_words):
                 }
                 matched_count += 1
         elif tag == "replace":
-            # Preserve Whisper's rhythm for mismatched text (e.g. contractions,
-            # spelling differences, slang). Count these toward matched_count so
-            # 'Driftin'' vs 'drifting' doesn't leave an unanchored gap.
             target_count = lyric_end - lyric_start
             t_chunk = [
                 timed_words[transcript_pairs[i][0]]
@@ -226,7 +368,7 @@ def anchored_time_slots(timed_words, lyric_words):
                 if resampled and len(resampled) == target_count:
                     for offset, slot in enumerate(resampled):
                         anchors[lyric_start + offset] = slot
-                    matched_count += target_count  # count replace matches too
+                    matched_count += target_count
 
     minimum_matches = min(6, max(2, len(lyric_words) // 8))
     if matched_count < minimum_matches:
@@ -304,13 +446,18 @@ def segment_guided_time_slots(transcript_segments, lyric_words):
     return enforce_monotonic_slots(slots)
 
 
-def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is_indic=False):
+def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is_indic=False, lrc_lines=None):
     import logging
     log = logging.getLogger("ttml_generator")
 
-    records = lyric_line_records(lyrics_text)
-    lyric_lines = [record["words"] for record in records if record["kind"] == "lyric"]
-    lyric_words = [word for line in lyric_lines for word in line]
+    if lrc_lines:
+        lyric_words = [word for line in lrc_lines for word in line.get("lyric_words", [])]
+        records = None
+    else:
+        records = lyric_line_records(lyrics_text)
+        lyric_lines = [record["words"] for record in records if record["kind"] == "lyric"]
+        lyric_words = [word for line in lyric_lines for word in line]
+
     if not lyric_words:
         return words, None
 
@@ -324,11 +471,21 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is
         len(timed_words), len(lyric_words), len(transcript_segments or []),
     )
 
-    slots, matched_count = anchored_time_slots(timed_words, lyric_words)
+    if lrc_lines:
+        log.info(
+            "Using hybrid LRC-constrained alignment: %d lrc_lines, %d whisperx_words",
+            len(lrc_lines), len(timed_words),
+        )
+        slots = lrc_constrained_time_slots(lrc_lines, timed_words, lyric_words)
+        used_fallback = False
+        matched_count = len(lyric_words)
+        match_rate = 1.0
+    else:
+        slots, matched_count = anchored_time_slots(timed_words, lyric_words)
+        used_fallback = False
+        match_rate = matched_count / max(len(lyric_words), 1)
 
-    used_fallback = False
-    match_rate = matched_count / max(len(lyric_words), 1)
-    if slots:
+    if not lrc_lines and slots:
         durations = [round(s["end"] - s["start"], 2) for s in slots]
         dur_counts = Counter(durations)
         most_common_count = dur_counts.most_common(1)[0][1] if dur_counts else 0
@@ -353,7 +510,7 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is
     # 6d: Indian language tracks with poor CTC alignment (<40% match) —
     # fall back to line-level sync by distributing words evenly within each
     # lyric line's segment boundary. Much better UX than random word flashes.
-    if is_indic and match_rate < 0.40 and transcript_segments:
+    if not lrc_lines and is_indic and match_rate < 0.40 and transcript_segments:
         log.info(
             "Indian language track with low match rate (%.0f%%) — using line-level sync.",
             match_rate * 100,
@@ -361,7 +518,7 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is
         slots = _line_level_slots(records, transcript_segments, lyric_words)
         used_fallback = True
 
-    if not slots:
+    if not lrc_lines and not slots:
         if transcript_segments:
             log.info("Using segment_guided_time_slots with %d segments.", len(transcript_segments))
             slots = segment_guided_time_slots(transcript_segments, lyric_words)
@@ -374,7 +531,10 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is
 
     # Log first 5 slots for inspection
     for i, slot in enumerate(slots[:5]):
-        source = "segment-guided" if used_fallback else "anchored"
+        if lrc_lines:
+            source = "hybrid"
+        else:
+            source = "segment-guided" if used_fallback else "anchored"
         log.info("  slot[%d] %s  start=%.3f  end=%.3f  word=%s",
                  i, source, slot["start"], slot["end"],
                  lyric_words[i] if i < len(lyric_words) else "?")
@@ -392,13 +552,23 @@ def words_with_lyrics_text(words, lyrics_text=None, transcript_segments=None, is
     # Build groups matching original lyric structure
     groups = []
     cursor = 0
-    for record in records:
-        if record["kind"] != "lyric":
-            groups.append({**record, "words": []})
-            continue
-        count = len(record["words"])
-        groups.append({**record, "words": mapped_words[cursor:cursor + count]})
-        cursor += count
+    if lrc_lines:
+        for line in lrc_lines:
+            count = len(line.get("lyric_words", []))
+            groups.append({
+                "kind": "lyric",
+                "text": line["text"],
+                "words": mapped_words[cursor:cursor + count],
+            })
+            cursor += count
+    else:
+        for record in records:
+            if record["kind"] != "lyric":
+                groups.append({**record, "words": []})
+                continue
+            count = len(record["words"])
+            groups.append({**record, "words": mapped_words[cursor:cursor + count]})
+            cursor += count
 
     return mapped_words, groups
 
@@ -471,9 +641,9 @@ def _line_level_slots(records, transcript_segments, lyric_words):
     return enforce_monotonic_slots(slots)
 
 
-def apply_lyrics_to_words(words, lyrics_text=None, transcript_segments=None, is_indic=False):
+def apply_lyrics_to_words(words, lyrics_text=None, transcript_segments=None, is_indic=False, lrc_lines=None):
     mapped_words, lyric_groups = words_with_lyrics_text(
-        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic,
+        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic, lrc_lines=lrc_lines,
     )
     if lyric_groups:
         return mapped_words, lyric_groups
@@ -493,18 +663,19 @@ def apply_phonetics(words, original_words):
 
 
 def generate_ttml(words, lyrics_text=None, language="en", include_phonetics=False,
-                  transcript_segments=None, is_indic=False):
+                  transcript_segments=None, is_indic=False, lrc_lines=None):
     language = language or "en"
     original_words = words
     words, groups = apply_lyrics_to_words(
-        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic,
+        words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic, lrc_lines=lrc_lines,
     )
     if include_phonetics:
         words = apply_phonetics(words, original_words)
+    sync_source_attr = ' data-sync-source="hybrid"' if lrc_lines else ""
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<tt xml:lang="{escape(language)}" xmlns="http://www.w3.org/ns/ttml"'
-        ' xmlns:tts="http://www.w3.org/ns/ttml#styling">',
+        f' xmlns:tts="http://www.w3.org/ns/ttml#styling"{sync_source_attr}>',
         "  <head>",
         "    <styling>",
         '      <style xml:id="default" tts:color="white" tts:fontSize="120%"/>',

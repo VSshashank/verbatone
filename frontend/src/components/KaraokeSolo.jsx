@@ -28,6 +28,7 @@ function ScoreBar({ label, value }) {
 }
 
 export default function KaraokeSolo({ track, isInstrumental, onUseInstrumental, onTrackUpdated }) {
+  const isSecureContext = window.location.protocol === "https:";
   const [stemStatus, setStemStatus] = useState("unprepared");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -158,12 +159,20 @@ export default function KaraokeSolo({ track, isInstrumental, onUseInstrumental, 
         </span>
       </div>
 
-      {(message || error) && (
-        <div className="border-b border-zinc-800 px-4 py-2 text-sm">
-          {message && <p className="text-zinc-300">{message}</p>}
-          {error && <p className="text-rose-200">{error}</p>}
-        </div>
-      )}
+      <div className="border-b border-zinc-800 px-4 py-2 text-sm">
+        {!isSecureContext ? (
+          <p className="text-amber-200">
+            Microphone access requires HTTPS. Open this app at https://localhost:5173 or
+            https://&lt;your-mac-ip&gt;:5173 (not http).
+          </p>
+        ) : (
+          <p className="text-zinc-500">
+            First time? On mobile, accept the security warning to enable mic access.
+          </p>
+        )}
+        {message && <p className="mt-2 text-zinc-300">{message}</p>}
+        {error && <p className="mt-2 text-rose-200">{error}</p>}
+      </div>
 
       <div className="grid gap-4 p-4 lg:grid-cols-[220px_minmax(0,1fr)]">
         <div className="flex flex-col items-center gap-3 rounded-md border border-zinc-800 bg-[#101214] p-3">

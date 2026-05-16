@@ -35,6 +35,31 @@ def _parse_lrc(lrc_string):
     return entries
 
 
+def parse_lrc_to_lines(lrc_string):
+    """
+    Parse LRC string into structured line objects for hybrid alignment.
+
+    Returns list of:
+      {"start": float, "end": float, "text": str, "lyric_words": [str]}
+    end = next line's start - 0.05s (or start + 5.0s for last line).
+    Skips instrumental/empty lines.
+    """
+    entries = _parse_lrc(lrc_string)
+    lines = []
+    for index, (start, text) in enumerate(entries):
+        if index + 1 < len(entries):
+            end = max(start + 0.05, entries[index + 1][0] - 0.05)
+        else:
+            end = start + 5.0
+        lines.append({
+            "start": start,
+            "end": round(end, 3),
+            "text": text,
+            "lyric_words": re.findall(r"\S+", text),
+        })
+    return lines
+
+
 def _secs_to_ttml(seconds):
     seconds = max(float(seconds), 0.0)
     h = int(seconds // 3600)
@@ -138,6 +163,90 @@ def lrc_to_ttml(lrc_string, language="en", include_phonetics=False):
             out.append(
                 f'    <p begin="{b}" end="{e}" data-kind="lyric" data-text="{safe_text}">'
                 f"{safe_text}</p>"
+            )
+
+    out.extend(["  </div></body>", "</tt>"])
+    return "\n".join(out)
+
+
+def merged_lines_to_ttml(merged_lines, language="en", include_phonetics=False):
+    """
+    Convert merged Genius+LRCLIB lines to TTML (line-level, same shape as lrc_to_ttml).
+
+    Parameters
+    ----------
+    merged_lines : list
+        Output of merge_genius_lrclib()["lines"] — dicts with kind, text, start, end.
+    """
+    language = language or "en"
+    lines = merged_lines or []
+    log.info("merged_lines_to_ttml: %d lines, lang=%s", len(lines), language)
+
+    lyric_starts = [
+        float(line["start"])
+        for line in lines
+        if line.get("kind") == "lyric" and line.get("start") is not None
+    ]
+
+    out = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<tt xml:lang="{escape(language)}" xmlns="http://www.w3.org/ns/ttml"'
+        ' xmlns:tts="http://www.w3.org/ns/ttml#styling"'
+        ' data-sync-source="genius+lrclib">',
+        "  <head><styling>",
+        '    <style xml:id="default" tts:color="white" tts:fontSize="120%"/>',
+        '    <style xml:id="active"  tts:color="yellow" tts:fontWeight="bold"/>',
+        '    <style xml:id="phonetic" tts:color="#94a3b8" tts:fontSize="75%"/>',
+        "  </styling></head>",
+        "  <body><div>",
+    ]
+
+    fallback_start = lyric_starts[0] if lyric_starts else 0.0
+    lyric_cursor = 0
+
+    for line in lines:
+        kind = line.get("kind", "lyric")
+        text = str(line.get("text", "") or "").strip()
+        safe_text = escape(text, quote=True)
+
+        if kind == "gap":
+            out.append('    <p data-kind="gap" data-text=""/>')
+            continue
+
+        if kind == "label":
+            out.append(f'    <p data-kind="label" data-text="{safe_text}"/>')
+            continue
+
+        if kind != "lyric" or not text:
+            continue
+
+        if line.get("start") is not None:
+            start = float(line["start"])
+        elif lyric_cursor < len(lyric_starts):
+            start = lyric_starts[lyric_cursor]
+        else:
+            start = fallback_start
+
+        if line.get("end") is not None:
+            end = float(line["end"])
+        else:
+            end = start + 5.0
+
+        lyric_cursor += 1
+
+        b = _secs_to_ttml(start)
+        e = _secs_to_ttml(end)
+
+        if include_phonetics:
+            spans = _word_spans(text, start, end, language, include_phonetics=True)
+            out.append(
+                f'    <p begin="{b}" end="{e}" data-kind="lyric" data-text="{safe_text}">\n'
+                f"{spans}\n    </p>"
+            )
+        else:
+            out.append(
+                f'    <p begin="{b}" end="{e}" data-kind="lyric" data-text="{safe_text}">'
+                f"{escape(text)}</p>"
             )
 
     out.extend(["  </div></body>", "</tt>"])

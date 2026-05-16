@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 function timeToSeconds(value) {
   if (!value) return 0;
@@ -183,15 +183,41 @@ export function useTTML(ttmlString, currentTime) {
   }, [ttmlString]);
 
   const words = useMemo(() => lines.flatMap((line) => line.words), [lines]);
-  const activeIdx = findActiveWordIndex(words, currentTime);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const prevActiveIdxRef = useRef(-1);
+
+  useEffect(() => {
+    const newIdx = findActiveWordIndex(words, currentTime);
+    if (newIdx !== prevActiveIdxRef.current) {
+      prevActiveIdxRef.current = newIdx;
+      setActiveIdx(newIdx);
+    }
+  }, [words, currentTime]);
+
   const activeWord = activeIdx >= 0 ? words[activeIdx] : null;
-  const activeLine = lines.find(
+  const stickyLineIdxRef = useRef(-1);
+
+  const rawActiveLine = lines.find(
     (line) =>
       line.kind === "lyric" &&
       currentTime >= (line.visualStart ?? line.start) &&
       currentTime <= (line.visualEnd ?? line.end),
   );
-  const activeLineIdx = activeWord?.lineIndex ?? activeLine?.lineIndex ?? -1;
+  const rawActiveLineIdx = activeWord?.lineIndex ?? rawActiveLine?.lineIndex ?? -1;
+
+  if (rawActiveLineIdx >= 0) {
+    stickyLineIdxRef.current = rawActiveLineIdx;
+  } else {
+    const nextLine = lines.find(
+      (line) => line.kind === "lyric" && line.start > currentTime,
+    );
+    const gapToNext = nextLine ? nextLine.start - currentTime : Infinity;
+    if (gapToNext > 1.5) {
+      stickyLineIdxRef.current = -1;
+    }
+  }
+
+  const activeLineIdx = stickyLineIdxRef.current;
 
   const hasPhonetics = useMemo(
     () => words.some((w) => w.phonetic !== null),

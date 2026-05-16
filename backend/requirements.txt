@@ -4,6 +4,7 @@ mutagen
 lyricsgenius
 pymusixmatch
 torch
+stable-ts
 whisperx
 indic-transliteration
 python-dotenv

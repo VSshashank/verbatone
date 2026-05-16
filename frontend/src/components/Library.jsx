@@ -133,6 +133,7 @@ export default function Library({
   onImported,
   onUploadFiles,
   onDeleteTrack,
+  onDeleteTrackAndFile,
   onSetType,
   onOpenSettings,
   isLoading,
@@ -234,10 +235,22 @@ export default function Library({
                 onDeleteTrack?.(track.id);
               }}
               className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition hover:bg-rose-500/10 hover:text-rose-200"
-              title="Remove from library"
+              title="Remove from library (keeps audio file for re-import)"
               aria-label={`Remove ${track.title || "track"} from library`}
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteTrackAndFile?.(track.id);
+              }}
+              className="flex h-7 items-center justify-center rounded-md border border-rose-500/30 px-1.5 text-[10px] font-medium text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-100"
+              title="Delete track and audio file from disk"
+              aria-label={`Delete ${track.title || "track"} and its audio file`}
+            >
+              File
             </button>
           </div>
           <span className="text-xs tabular-nums text-zinc-500">

@@ -244,14 +244,22 @@ export default function App() {
     }
   }
 
-  async function deleteTrack(trackId) {
+  async function removeTrackFromLibrary(trackId, { deleteFile = false } = {}) {
     const track = tracks.find((item) => item.id === trackId);
     if (!track) return;
-    const confirmed = window.confirm(`Remove "${track.title || "this track"}" from Verbatone?`);
+
+    const confirmed = deleteFile
+      ? window.confirm(
+          `Permanently delete "${track.title || "this track"}" and its audio file from disk? This cannot be undone.`,
+        )
+      : window.confirm(
+          `Remove "${track.title || "this track"}" from Verbatone? The audio file will stay on disk so you can re-import it.`,
+        );
     if (!confirmed) return;
 
     try {
-      await fetchJson(`/api/track/${trackId}`, { method: "DELETE" });
+      const url = deleteFile ? `/api/track/${trackId}?delete_file=1` : `/api/track/${trackId}`;
+      await fetchJson(url, { method: "DELETE" });
       setTracks((currentTracks) => {
         const nextTracks = currentTracks.filter((item) => item.id !== trackId);
         if (selectedTrackId === trackId) {
@@ -259,11 +267,23 @@ export default function App() {
         }
         return nextTracks;
       });
-      setNotice("Track removed from library.");
+      setNotice(
+        deleteFile
+          ? "Track and audio file deleted."
+          : "Track removed from library. You can re-import the same file anytime.",
+      );
       setError("");
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function deleteTrack(trackId) {
+    return removeTrackFromLibrary(trackId);
+  }
+
+  function deleteTrackAndFile(trackId) {
+    return removeTrackFromLibrary(trackId, { deleteFile: true });
   }
 
   return (
@@ -275,6 +295,7 @@ export default function App() {
         onImported={importPath}
         onUploadFiles={uploadFiles}
         onDeleteTrack={deleteTrack}
+        onDeleteTrackAndFile={deleteTrackAndFile}
         onSetType={setTrackType}
         onOpenSettings={() => setSettingsOpen(true)}
         isLoading={isImporting}

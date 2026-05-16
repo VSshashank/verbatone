@@ -25,6 +25,11 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const [timeOffset, setTimeOffset] = useState(DEFAULT_LYRIC_LEAD);
   const activeRef = useRef(null);
   const pollRef = useRef(null);
+  const lyricsContainerRef = useRef(null);
+  const scrollRafRef = useRef(null);
+  const prevActiveLineIdxRef = useRef(-1);
+  const lineJustActivatedRef = useRef(false);
+  const lineActivationTimerRef = useRef(null);
   const effectiveTime = currentTime + timeOffset;
   const { lines, activeIdx, activeLineIdx, activeWord, hasPhonetics, syncSource } = useTTML(ttml, effectiveTime);
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
@@ -53,14 +58,72 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   }, [track?.id]);
 
   useEffect(() => {
-    if (activeRef.current) {
-      activeRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (activeLineIdx !== prevActiveLineIdxRef.current) {
+      lineJustActivatedRef.current = true;
+      prevActiveLineIdxRef.current = activeLineIdx;
+      if (lineActivationTimerRef.current) {
+        clearTimeout(lineActivationTimerRef.current);
+      }
+      lineActivationTimerRef.current = setTimeout(() => {
+        lineJustActivatedRef.current = false;
+        lineActivationTimerRef.current = null;
+      }, 380);
     }
+    return () => {
+      if (lineActivationTimerRef.current) {
+        clearTimeout(lineActivationTimerRef.current);
+      }
+    };
+  }, [activeLineIdx]);
+
+  useEffect(() => {
+    const container = lyricsContainerRef.current;
+    const target = activeRef.current;
+    if (!container || !target) return undefined;
+
+    if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+
+    const containerHeight = container.clientHeight;
+    const targetRect = target.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const targetTop =
+      container.scrollTop +
+      (targetRect.top - containerRect.top) -
+      containerHeight / 2 +
+      targetRect.height / 2;
+    const startTop = container.scrollTop;
+    const diff = targetTop - startTop;
+
+    if (Math.abs(diff) < 8) return undefined;
+
+    const duration = 380;
+    const startTime = performance.now();
+    const ease = (t) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t);
+
+    const step = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      container.scrollTop = startTop + diff * ease(progress);
+      if (progress < 1) {
+        scrollRafRef.current = requestAnimationFrame(step);
+      } else {
+        scrollRafRef.current = null;
+      }
+    };
+
+    scrollRafRef.current = requestAnimationFrame(step);
+
+    return () => {
+      if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+    };
   }, [activeLineIdx]);
 
   async function loadTtml(trackId) {
     try {
-      const response = await fetch(`/api/ttml/${trackId}`);
+      const response = await fetch(
+        `/api/ttml/${trackId}?t=${Date.now()}`,
+        { cache: "no-store" },
+      );
       if (!response.ok) return;
       setTtml(await response.text());
       setError("");
@@ -76,6 +139,10 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
         const result = await fetchJson(`/api/align/status/${trackId}`);
         if (result.track) onTrackUpdated?.(result.track);
         if (result.error) setError(result.error);
+        const jobStatus = result.status || result.track?.status;
+        if (jobStatus === "aligning" || jobStatus === "fetching_lyrics") {
+          setTtml("");
+        }
         if (result.status === "ready") {
           window.clearInterval(pollRef.current);
           pollRef.current = null;
@@ -105,6 +172,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   async function alignWithLyrics(text) {
     if (!track?.id) return;
+    setTtml("");
     setIsWorking(true);
     setError("");
     setMessage("Aligning lyrics...");
@@ -127,6 +195,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   async function generateLyrics() {
     if (!track?.id) return;
+    setTtml("");
     setIsWorking(true);
     setError("");
     setMessage("Looking for lyrics...");
@@ -157,6 +226,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   async function generateSubtitles() {
     if (!track?.id) return;
+    setTtml("");
     setIsWorking(true);
     setError("");
     setMessage("Transcribing audio...");
@@ -213,6 +283,74 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     return (effectiveTime - start) / duration;
   }
 
+  function getWordState(word) {
+    const start = word.visualStart ?? word.start;
+    const end = word.visualEnd ?? word.end;
+    if (effectiveTime >= start && effectiveTime < end) return "active";
+    if (effectiveTime >= end && effectiveTime - end < 0.5) return "recent";
+    if (effectiveTime < start) return "upcoming";
+    return "past";
+  }
+
+  function lyricLineClassName(isActiveLine, isComplete) {
+    return `mx-auto max-w-full px-2 text-[1.55rem] will-change-[opacity,transform] transition-[opacity,transform] duration-[350ms] ease-[cubic-bezier(0.25,0.1,0.25,1)] md:text-[1.95rem] ${isActiveLine
+      ? "scale-[1.02] opacity-100"
+      : isComplete
+        ? "scale-[1.0] opacity-[0.72]"
+        : "scale-[1.0] opacity-30"
+      }`;
+  }
+
+  function lyricWordPresentation(word, isActiveLine, lineJustActivated) {
+    const state = getWordState(word);
+    const isActiveWord = state === "active";
+    const isRapWord = (word.end - word.start) < 0.3;
+    const baseTransition = "transition-[opacity,background-image,transform,filter] duration-[80ms] ease-out";
+
+    let opacity = 0.35;
+    if (isActiveLine) {
+      if (state === "active") opacity = 1.0;
+      else if (state === "recent") opacity = 0.7;
+      else opacity = 0.65;
+    } else if (state === "active") {
+      opacity = 1.0;
+    } else if (state === "recent") {
+      opacity = 0.7;
+    } else if (state === "upcoming") {
+      opacity = 0.5;
+    }
+
+    const style = {
+      opacity,
+      transition: "background-image 80ms ease-out, opacity 60ms ease-out, transform 80ms ease-out, filter 80ms ease-out",
+    };
+
+    if (isActiveWord) {
+      const progress = Math.round(wordProgress(word) * 1000) / 10;
+      style.backgroundImage = `linear-gradient(90deg, #fef3c7 ${progress}%, #facc15 ${Math.min(
+        progress + 12,
+        100,
+      )}%, #d4d4d8 ${Math.min(progress + 12, 100)}%)`;
+      style.WebkitBackgroundClip = "text";
+      style.color = "transparent";
+      style.filter = "drop-shadow(0 0 10px rgba(251, 191, 36, 0.45))";
+      if (isRapWord && !lineJustActivated) {
+        style.animation = "wordPop 80ms ease-out";
+      }
+    }
+
+    let className = `mr-2 inline-block align-baseline ${baseTransition} `;
+    if (isActiveWord) {
+      className += "scale-[1.055] ";
+    } else if (isActiveLine) {
+      className += "text-zinc-300 ";
+    } else {
+      className += "text-zinc-500 ";
+    }
+
+    return { className: className.trim(), style };
+  }
+
   function syncLabel() {
     if (timeOffset === 0) return "Lyrics at audio time";
     if (timeOffset > 0) return `Lyrics ${timeOffset.toFixed(1)}s early`;
@@ -220,13 +358,17 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   }
 
   function renderPhoneticLine(line, isActiveLine) {
+    const isComplete = line.end > 0 && effectiveTime > line.end;
     return (
       <p
         key={line.id}
         ref={isActiveLine ? activeRef : null}
-        className={`min-h-[2.75rem] transition-all duration-500 ${
-          isActiveLine ? "scale-[1.03] opacity-100" : "opacity-55"
-        }`}
+        className={`min-h-[2.75rem] will-change-[opacity,transform] transition-[opacity,transform] duration-[350ms] ease-[cubic-bezier(0.25,0.1,0.25,1)] ${isActiveLine
+          ? "scale-[1.02] opacity-100"
+          : isComplete
+            ? "scale-[1.0] opacity-[0.72]"
+            : "scale-[1.0] opacity-30"
+          }`}
       >
         {line.words.map((word) => {
           const progress = wordProgress(word);
@@ -268,31 +410,6 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     );
   }
 
-  function lyricWordClass(word, isActiveLine) {
-    if (word.globalIndex < activeIdx) {
-      return "text-amber-200";
-    }
-    if (word.globalIndex === activeIdx) {
-      return "scale-[1.055]";
-    }
-    return isActiveLine ? "text-zinc-300" : "text-zinc-500";
-  }
-
-  function lyricWordStyle(word) {
-    const isActiveWord = word.globalIndex === activeIdx;
-    if (!isActiveWord) return undefined;
-    const progress = Math.round(wordProgress(word) * 1000) / 10;
-    return {
-      backgroundImage: `linear-gradient(90deg, #fef3c7 ${progress}%, #facc15 ${Math.min(
-        progress + 12,
-        100,
-      )}%, #d4d4d8 ${Math.min(progress + 12, 100)}%)`,
-      WebkitBackgroundClip: "text",
-      color: "transparent",
-      filter: "drop-shadow(0 0 10px rgba(251, 191, 36, 0.45))",
-    };
-  }
-
   if (!track) {
     return (
       <section className="min-h-[260px] rounded-md border border-zinc-800 bg-[#171a1d] p-4 text-sm text-zinc-400">
@@ -303,6 +420,13 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   return (
     <section className="flex min-h-[260px] flex-col rounded-md border border-zinc-800 bg-[#171a1d]">
+      <style>{`
+        @keyframes wordPop {
+          0% { transform: scale(1); }
+          30% { transform: scale(1.04); }
+          100% { transform: scale(1); }
+        }
+      `}</style>
       {isDebugMode && (
         <div
           id="verbatone-debug-hud"
@@ -324,27 +448,27 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
           }}
         >
           <div style={{ color: "#86efac", fontWeight: "bold", marginBottom: "4px" }}>🎵 Verbatone Debug HUD</div>
-          <div><span style={{color:"#94a3b8"}}>currentTime     </span>{currentTime.toFixed(3)}s</div>
-          <div><span style={{color:"#94a3b8"}}>effectiveTime   </span>{effectiveTime.toFixed(3)}s</div>
-          <div><span style={{color:"#94a3b8"}}>timeOffset      </span>{timeOffset.toFixed(3)}s</div>
+          <div><span style={{ color: "#94a3b8" }}>currentTime     </span>{currentTime.toFixed(3)}s</div>
+          <div><span style={{ color: "#94a3b8" }}>effectiveTime   </span>{effectiveTime.toFixed(3)}s</div>
+          <div><span style={{ color: "#94a3b8" }}>timeOffset      </span>{timeOffset.toFixed(3)}s</div>
           <hr style={{ border: "none", borderTop: "1px solid #374151", margin: "4px 0" }} />
           {activeWord ? (
             <>
-              <div><span style={{color:"#94a3b8"}}>activeWord.text </span><span style={{color:"#fde68a"}}>{activeWord.text}</span></div>
-              <div><span style={{color:"#94a3b8"}}>activeWord.start</span>{activeWord.start.toFixed(3)}s</div>
-              <div><span style={{color:"#94a3b8"}}>activeWord.end  </span>{activeWord.end.toFixed(3)}s</div>
+              <div><span style={{ color: "#94a3b8" }}>activeWord.text </span><span style={{ color: "#fde68a" }}>{activeWord.text}</span></div>
+              <div><span style={{ color: "#94a3b8" }}>activeWord.start</span>{activeWord.start.toFixed(3)}s</div>
+              <div><span style={{ color: "#94a3b8" }}>activeWord.end  </span>{activeWord.end.toFixed(3)}s</div>
               <div>
-                <span style={{color:"#94a3b8"}}>delta (eff-start)</span>
+                <span style={{ color: "#94a3b8" }}>delta (eff-start)</span>
                 <span style={{ color: Math.abs(effectiveTime - activeWord.start) > 1.5 ? "#f87171" : "#86efac" }}>
                   {(effectiveTime - activeWord.start).toFixed(3)}s
                 </span>
               </div>
             </>
           ) : (
-            <div style={{color:"#6b7280"}}>no active word</div>
+            <div style={{ color: "#6b7280" }}>no active word</div>
           )}
           <hr style={{ border: "none", borderTop: "1px solid #374151", margin: "4px 0" }} />
-          <div><span style={{color:"#94a3b8"}}>totalWords      </span>{lines.flatMap(l => l.words ?? []).length}</div>
+          <div><span style={{ color: "#94a3b8" }}>totalWords      </span>{lines.flatMap(l => l.words ?? []).length}</div>
         </div>
       )}
 
@@ -354,7 +478,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
           <h3 className="truncate text-sm font-semibold text-zinc-100">
             {isPodcast ? "Synced subtitles" : "Synced lyrics"}
           </h3>
-          {syncSource === "lrclib" && (
+          {(syncSource === "lrclib" || syncSource === "genius+lrclib") && (
             <span
               title="Timestamps from LRCLIB — sample-accurate line sync"
               className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-teal-300 ring-1 ring-inset ring-teal-500/30"
@@ -480,7 +604,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
         </form>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+      <div ref={lyricsContainerRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
         {lines.length ? (
           <div className="mx-auto max-w-4xl space-y-5 text-center font-semibold leading-[1.65] tracking-normal">
             {lines.map((line) => {
@@ -507,28 +631,26 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
                 <p
                   key={line.id}
                   ref={isActiveLine ? activeRef : null}
-                  className={`mx-auto max-w-full px-2 text-[1.55rem] transition-all duration-500 ease-out md:text-[1.95rem] ${
-                    isActiveLine
-                      ? "scale-[1.035] opacity-100"
-                    : isComplete
-                        ? "opacity-[0.82]"
-                        : "opacity-45"
-                  }`}
+                  className={lyricLineClassName(isActiveLine, isComplete)}
                 >
-                  {line.words.map((word) => (
+                  {line.words.map((word) => {
+                    const presentation = lyricWordPresentation(
+                      word,
+                      isActiveLine,
+                      lineJustActivatedRef.current,
+                    );
+                    return (
                     <Fragment key={word.id}>
                       <span
-                        className={`mr-2 inline-block align-baseline transition-[color,transform,filter] duration-200 ease-out ${lyricWordClass(
-                          word,
-                          isActiveLine,
-                        )}`}
-                        style={lyricWordStyle(word)}
+                        className={presentation.className}
+                        style={presentation.style}
                       >
                         {word.text}
                       </span>
                       {" "}
                     </Fragment>
-                  ))}
+                    );
+                  })}
                 </p>
               );
             })}
