@@ -666,12 +666,15 @@ def generate_ttml(words, lyrics_text=None, language="en", include_phonetics=Fals
                   transcript_segments=None, is_indic=False, lrc_lines=None):
     language = language or "en"
     original_words = words
+    sync_source = "lrc-hybrid" if lrc_lines else "stable-ts"
+    if not lyrics_text and not lrc_lines:
+        sync_source = "transcript"
     words, groups = apply_lyrics_to_words(
         words, lyrics_text, transcript_segments=transcript_segments, is_indic=is_indic, lrc_lines=lrc_lines,
     )
     if include_phonetics:
         words = apply_phonetics(words, original_words)
-    sync_source_attr = ' data-sync-source="hybrid"' if lrc_lines else ""
+    sync_source_attr = f' data-sync-source="{escape(sync_source, quote=True)}"'
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<tt xml:lang="{escape(language)}" xmlns="http://www.w3.org/ns/ttml"'

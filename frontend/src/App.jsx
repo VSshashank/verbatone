@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X } from "lucide-react";
+import { X } from "./icons.js";
 import Library from "./components/Library.jsx";
 import Player from "./components/Player.jsx";
 

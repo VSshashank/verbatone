@@ -1,4 +1,4 @@
-import { AlertTriangle, Mic2, Pause, Play, SkipBack, SkipForward, Volume2 } from "lucide-react";
+import { AlertTriangle, Captions, Disc3, Mic2, Pause, Play, SkipBack, SkipForward, Sparkles, Volume2 } from "../icons.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import LyricsDisplay from "./LyricsDisplay.jsx";
 import KaraokeSolo from "./KaraokeSolo.jsx";
@@ -25,6 +25,7 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
   );
   const hasPrevious = activeIndex > 0;
   const hasNext = activeIndex >= 0 && activeIndex < tracks.length - 1;
+  const queueLabel = activeIndex >= 0 ? `${activeIndex + 1} of ${tracks.length}` : `${tracks.length} tracks`;
 
   const audioSrc = track
     ? useInstrumental
@@ -69,17 +70,25 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-[#111316]">
+    <section className="flex min-h-0 flex-1 flex-col bg-[#101215]">
       <div className="min-h-0 flex-1 overflow-y-auto p-5">
         {track ? (
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
-            <div className="grid grid-cols-[minmax(190px,280px)_minmax(0,1fr)] gap-5 rounded-md border border-zinc-800 bg-[#171a1d] p-4 max-md:grid-cols-1">
-              <div className="aspect-square overflow-hidden rounded-md bg-[#24282d] shadow-lg">
+            <div className="relative overflow-hidden rounded-md border border-zinc-800 bg-[#171a1d] shadow-2xl shadow-black/20">
+              {track.cover_art && (
+                <img
+                  src={track.cover_art}
+                  alt=""
+                  className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-15 blur-2xl"
+                />
+              )}
+              <div className="player-hero-grid relative grid gap-5 p-4">
+              <div className="aspect-square overflow-hidden rounded-md bg-[#24282d] shadow-xl shadow-black/30 ring-1 ring-white/5">
                 {track.cover_art ? (
                   <img src={track.cover_art} alt="" className="h-full w-full object-cover" />
                 ) : (
                   <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-                    No cover art
+                    <Disc3 className="h-12 w-12" aria-hidden="true" />
                   </div>
                 )}
               </div>
@@ -92,6 +101,21 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
                   <span className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400">
                     {track.status || "unprocessed"}
                   </span>
+                  <span className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400">
+                    Queue {queueLabel}
+                  </span>
+                  {track.ttml_path && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-sky-400/30 bg-sky-400/10 px-2 py-1 text-xs text-sky-100">
+                      <Captions className="h-3.5 w-3.5" aria-hidden="true" />
+                      Lyrics ready
+                    </span>
+                  )}
+                  {track.instrumental_path && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1 text-xs text-amber-100">
+                      <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                      Karaoke ready
+                    </span>
+                  )}
                 </div>
                 <h2 className="text-balance text-3xl font-semibold tracking-normal text-zinc-50 max-md:text-2xl">
                   {track.title || "Untitled"}
@@ -102,7 +126,7 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
                 <p className="mt-1 truncate text-sm text-zinc-500">
                   {track.album || "Unknown Album"}
                 </p>
-                <div className="mt-6 rounded-md border border-zinc-800 bg-[#101214] p-4">
+                <div className="mt-6 rounded-md border border-zinc-800 bg-[#101214]/90 p-4 backdrop-blur">
                   <div className="flex items-center justify-between text-xs tabular-nums text-zinc-400">
                     <span>{formatTime(currentTime)}</span>
                     <span>{formatTime(duration || track.duration)}</span>
@@ -135,6 +159,7 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
                   </button>
                 </div>
               </div>
+              </div>
             </div>
             {karaokeOpen && (
               <KaraokeSolo
@@ -164,7 +189,7 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
         )}
       </div>
 
-      <div className="border-t border-zinc-800 bg-[#171a1d] px-4 py-3">
+      <div className="border-t border-zinc-800 bg-[#15181b]/95 px-4 py-3 backdrop-blur">
         <audio
           ref={audioRef}
           src={audioSrc}
@@ -180,13 +205,13 @@ export default function Player({ track, tracks, onSelectTrack, onTrackUpdated })
           }}
           preload="metadata"
         />
-        <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium text-zinc-100">
               {track?.title || "Ready when you are"}
             </div>
             <div className="truncate text-xs text-zinc-500">
-              {track?.path || "No audio loaded"}
+              {track ? `${track.artist || "Unknown Artist"} · ${queueLabel}` : "No audio loaded"}
             </div>
           </div>
 

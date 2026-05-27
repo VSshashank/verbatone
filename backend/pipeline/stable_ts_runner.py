@@ -5,16 +5,28 @@ log = logging.getLogger("stable_ts_runner")
 
 MODEL_CACHE = {}
 
-try:
-    import stable_whisper
+stable_whisper = None
+_STABLE_TS_AVAILABLE = None
 
-    _STABLE_TS_AVAILABLE = True
-except ImportError:
-    stable_whisper = None
-    _STABLE_TS_AVAILABLE = False
+
+def _load_stable_whisper():
+    global stable_whisper, _STABLE_TS_AVAILABLE
+    if _STABLE_TS_AVAILABLE is not None:
+        return _STABLE_TS_AVAILABLE
+    try:
+        import stable_whisper as stable_whisper_module
+    except ImportError:
+        stable_whisper = None
+        _STABLE_TS_AVAILABLE = False
+    else:
+        stable_whisper = stable_whisper_module
+        _STABLE_TS_AVAILABLE = True
+    return _STABLE_TS_AVAILABLE
 
 
 def _get_model(model_size):
+    if not _load_stable_whisper():
+        raise RuntimeError("stable-ts is not installed.")
     if model_size not in MODEL_CACHE:
         log.info("Loading stable-ts model=%s", model_size)
         MODEL_CACHE[model_size] = stable_whisper.load_model(model_size)
@@ -128,7 +140,7 @@ def align(
     Returns the same shape as whisperx_runner.align():
       {"words": [{"word", "start", "end"}, ...], "segments": [...], "language": str}
     """
-    if not _STABLE_TS_AVAILABLE:
+    if not _load_stable_whisper():
         from pipeline.whisperx_runner import align as whisperx_align
 
         log.warning("stable-ts not available, falling back to WhisperX")

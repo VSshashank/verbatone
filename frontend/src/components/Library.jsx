@@ -1,6 +1,7 @@
 import {
   Album,
   FileAudio,
+  FileX2,
   FolderOpen,
   FolderPlus,
   Layers3,
@@ -13,7 +14,7 @@ import {
   Trash2,
   UserRound,
   X,
-} from "lucide-react";
+} from "../icons.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const UNKNOWN_ALBUM = "Unknown Album";
@@ -246,11 +247,11 @@ export default function Library({
                 e.stopPropagation();
                 onDeleteTrackAndFile?.(track.id);
               }}
-              className="flex h-7 items-center justify-center rounded-md border border-rose-500/30 px-1.5 text-[10px] font-medium text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-100"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-rose-500/30 text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-100"
               title="Delete track and audio file from disk"
               aria-label={`Delete ${track.title || "track"} and its audio file`}
             >
-              File
+              <FileX2 className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </div>
           <span className="text-xs tabular-nums text-zinc-500">

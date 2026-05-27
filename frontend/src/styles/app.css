@@ -23,6 +23,35 @@ body {
   background: #121417;
 }
 
+::selection {
+  background: rgba(20, 184, 166, 0.35);
+  color: #f8fafc;
+}
+
+* {
+  scrollbar-color: #3f464d #15181b;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #15181b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f464d;
+  border: 2px solid #15181b;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #525b64;
+}
+
 button,
 input {
   font: inherit;
@@ -30,4 +59,88 @@ input {
 
 input[type="range"] {
   accent-color: #14b8a6;
+}
+
+input[type="range"]:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid rgba(45, 212, 191, 0.75);
+  outline-offset: 2px;
+}
+
+.lyrics-stage-bg {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(20, 184, 166, 0.08), transparent 42%),
+    linear-gradient(180deg, #111316, #14171a);
+}
+
+.lyric-line {
+  transition:
+    opacity 350ms cubic-bezier(0.25, 0.1, 0.25, 1),
+    transform 350ms cubic-bezier(0.25, 0.1, 0.25, 1);
+  will-change: opacity, transform;
+}
+
+.lyric-line-stage {
+  font-size: 1.55rem;
+}
+
+.lyric-line-compact {
+  font-size: 1.1rem;
+}
+
+.lyric-scale-active {
+  transform: scale(1.02);
+}
+
+.lyric-word {
+  transition:
+    opacity 60ms ease-out,
+    background-image 80ms ease-out,
+    transform 80ms ease-out,
+    filter 80ms ease-out;
+}
+
+.lyric-word-active {
+  transform: scale(1.055);
+}
+
+.phonetic-word-fill {
+  transition:
+    background-image 150ms linear,
+    filter 150ms linear;
+}
+
+.active-line-progress {
+  transition: width 75ms linear;
+}
+
+.player-hero-grid {
+  grid-template-columns: minmax(190px, 280px) minmax(0, 1fr);
+}
+
+.karaoke-grid {
+  grid-template-columns: 220px minmax(0, 1fr) 300px;
+}
+
+@media (max-width: 767px) {
+  .player-hero-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 768px) {
+  .lyric-line-stage {
+    font-size: 1.95rem;
+  }
+
+  .lyric-line-compact {
+    font-size: 1.25rem;
+  }
+}
+
+@media (max-width: 1279px) {
+  .karaoke-grid {
+    grid-template-columns: 1fr;
+  }
 }

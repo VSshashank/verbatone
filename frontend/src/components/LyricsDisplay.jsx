@@ -1,4 +1,15 @@
-import { FileText, Minus, PencilLine, Plus, RefreshCcw, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import {
+  Eye,
+  FileText,
+  Gauge,
+  Minus,
+  PencilLine,
+  Plus,
+  RefreshCcw,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+} from "../icons.js";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useTTML } from "../hooks/useTTML.js";
 import PhoneticLayer from "./PhoneticLayer.jsx";
@@ -23,6 +34,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   const [error, setError] = useState("");
   const [showPhonetics, setShowPhonetics] = useState(false);
   const [timeOffset, setTimeOffset] = useState(DEFAULT_LYRIC_LEAD);
+  const [viewMode, setViewMode] = useState("stage");
   const activeRef = useRef(null);
   const pollRef = useRef(null);
   const lyricsContainerRef = useRef(null);
@@ -45,6 +57,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
     setError("");
     setShowPhonetics(false);
     setTimeOffset(DEFAULT_LYRIC_LEAD);
+    setViewMode("stage");
     if (!track?.id) return undefined;
     loadTtml(track.id);
     if (track.status === "aligning" || track.status === "fetching_lyrics") {
@@ -293,19 +306,61 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
   }
 
   function lyricLineClassName(isActiveLine, isComplete) {
-    return `mx-auto max-w-full px-2 text-[1.55rem] will-change-[opacity,transform] transition-[opacity,transform] duration-[350ms] ease-[cubic-bezier(0.25,0.1,0.25,1)] md:text-[1.95rem] ${isActiveLine
-      ? "scale-[1.02] opacity-100"
-      : isComplete
-        ? "scale-[1.0] opacity-[0.72]"
-        : "scale-[1.0] opacity-30"
-      }`;
+    const modeSize = viewMode === "compact"
+      ? "lyric-line-compact"
+      : "lyric-line-stage";
+    const visibility = viewMode === "focus" && !isActiveLine && !isComplete
+      ? "opacity-10"
+      : isActiveLine
+        ? "lyric-scale-active opacity-100"
+        : isComplete
+          ? "opacity-70"
+          : "opacity-30";
+
+    return `lyric-line mx-auto max-w-full px-2 ${modeSize} ${visibility}`;
+  }
+
+  function activeLineProgress(line) {
+    const start = line.visualStart ?? line.start;
+    const end = line.visualEnd ?? line.end;
+    if (effectiveTime <= start) return 0;
+    if (effectiveTime >= end) return 100;
+    return Math.max(0, Math.min(100, ((effectiveTime - start) / Math.max(end - start, 0.001)) * 100));
+  }
+
+  function syncSourceLabel() {
+    if (syncSource === "lrc-hybrid") return "Hybrid line+word sync";
+    if (syncSource === "stable-ts") return "Audio aligned";
+    if (syncSource === "transcript") return "Transcript timing";
+    return "Sync source unknown";
+  }
+
+  function syncSourceClass() {
+    if (syncSource === "lrc-hybrid") return "border-teal-400/30 bg-teal-400/10 text-teal-200";
+    if (syncSource === "stable-ts") return "border-sky-400/30 bg-sky-400/10 text-sky-200";
+    if (syncSource === "transcript") return "border-amber-400/30 bg-amber-400/10 text-amber-200";
+    return "border-zinc-700 bg-zinc-800/50 text-zinc-300";
+  }
+
+  function visibleLines() {
+    if (viewMode !== "focus" || activeLineIdx < 0) return lines;
+    return lines.filter((line) => {
+      if (line.kind !== "lyric") return true;
+      return Math.abs(line.lineIndex - activeLineIdx) <= 1;
+    });
+  }
+
+  function lyricStageClass() {
+    return viewMode === "compact"
+      ? "mx-auto max-w-4xl space-y-3 text-center font-semibold leading-[1.45] tracking-normal"
+      : "mx-auto max-w-4xl space-y-5 text-center font-semibold leading-[1.65] tracking-normal";
   }
 
   function lyricWordPresentation(word, isActiveLine, lineJustActivated) {
     const state = getWordState(word);
     const isActiveWord = state === "active";
     const isRapWord = (word.end - word.start) < 0.3;
-    const baseTransition = "transition-[opacity,background-image,transform,filter] duration-[80ms] ease-out";
+    const baseTransition = "lyric-word";
 
     let opacity = 0.35;
     if (isActiveLine) {
@@ -341,7 +396,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
     let className = `mr-2 inline-block align-baseline ${baseTransition} `;
     if (isActiveWord) {
-      className += "scale-[1.055] ";
+      className += "lyric-word-active ";
     } else if (isActiveLine) {
       className += "text-zinc-300 ";
     } else {
@@ -363,11 +418,11 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
       <p
         key={line.id}
         ref={isActiveLine ? activeRef : null}
-        className={`min-h-[2.75rem] will-change-[opacity,transform] transition-[opacity,transform] duration-[350ms] ease-[cubic-bezier(0.25,0.1,0.25,1)] ${isActiveLine
-          ? "scale-[1.02] opacity-100"
+        className={`lyric-line min-h-[2.75rem] ${isActiveLine
+          ? "lyric-scale-active opacity-100"
           : isComplete
-            ? "scale-[1.0] opacity-[0.72]"
-            : "scale-[1.0] opacity-30"
+            ? "opacity-70"
+            : "opacity-30"
           }`}
       >
         {line.words.map((word) => {
@@ -383,7 +438,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
                 }}
               >
                 <span
-                  className="inline-block bg-clip-text text-transparent transition-[background-image,filter] duration-150 ease-linear"
+                  className="phonetic-word-fill inline-block bg-clip-text text-transparent"
                   style={{
                     backgroundImage: `linear-gradient(90deg, #fde68a ${Math.round(
                       progress * 100,
@@ -412,14 +467,14 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
 
   if (!track) {
     return (
-      <section className="min-h-[260px] rounded-md border border-zinc-800 bg-[#171a1d] p-4 text-sm text-zinc-400">
+      <section className="min-h-64 rounded-md border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-400">
         Select a track to view synced lyrics.
       </section>
     );
   }
 
   return (
-    <section className="flex min-h-[260px] flex-col rounded-md border border-zinc-800 bg-[#171a1d]">
+    <section className="flex min-h-96 flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/20">
       <style>{`
         @keyframes wordPop {
           0% { transform: scale(1); }
@@ -472,22 +527,40 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-900/95 px-4 py-3 backdrop-blur">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="h-4 w-4 shrink-0 text-teal-300" aria-hidden="true" />
           <h3 className="truncate text-sm font-semibold text-zinc-100">
             {isPodcast ? "Synced subtitles" : "Synced lyrics"}
           </h3>
-          {(syncSource === "lrclib" || syncSource === "genius+lrclib") && (
+          {syncSource && (
             <span
-              title="Timestamps from LRCLIB — sample-accurate line sync"
-              className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-teal-300 ring-1 ring-inset ring-teal-500/30"
+              title={syncSourceLabel()}
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${syncSourceClass()}`}
             >
-              ✦ Synced
+              <Gauge className="h-3 w-3" aria-hidden="true" />
+              {syncSourceLabel()}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {ttml && (
+            <div className="flex rounded-md border border-zinc-700 bg-zinc-950 p-0.5">
+              {["stage", "focus", "compact"].map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setViewMode(mode)}
+                  className={`h-7 rounded px-2 text-xs font-medium capitalize transition ${
+                    viewMode === mode ? "bg-zinc-700 text-zinc-50" : "text-zinc-500 hover:text-zinc-200"
+                  }`}
+                  title={`${mode} lyric view`}
+                >
+                  {mode === "stage" ? <Eye className="h-3.5 w-3.5" aria-hidden="true" /> : mode}
+                </button>
+              ))}
+            </div>
+          )}
           <PhoneticLayer
             hasPhonetics={hasPhonetics}
             showPhonetics={showPhonetics}
@@ -498,7 +571,7 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
               type="button"
               onClick={openManualLyrics}
               disabled={isWorking}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-[#101214] px-3 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <PencilLine className="h-4 w-4" aria-hidden="true" />
               <span>Paste lyrics</span>
@@ -550,8 +623,12 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
       )}
 
       {ttml && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
-          <span>{syncLabel()}</span>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2 text-xs text-zinc-400">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span>{syncLabel()}</span>
+            <span className="text-zinc-600">·</span>
+            <span>{lines.flatMap((line) => line.words).length} words</span>
+          </div>
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -590,13 +667,13 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
             value={lyricsText}
             onChange={(event) => setLyricsText(event.target.value)}
             placeholder="Paste the exact lyrics here. Keep line breaks as you want them displayed."
-            className="h-32 w-full resize-none rounded-md border border-zinc-700 bg-[#101214] px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400"
+            className="h-32 w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400"
           />
           <div className="mt-3 flex justify-end">
             <button
               type="submit"
               disabled={isWorking}
-              className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-700 bg-[#101214] px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {ttml ? "Regenerate with pasted lyrics" : "Align lyrics"}
             </button>
@@ -604,17 +681,20 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
         </form>
       )}
 
-      <div ref={lyricsContainerRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+      <div
+        ref={lyricsContainerRef}
+        className="lyrics-stage-bg relative min-h-0 flex-1 overflow-y-auto px-4 py-7"
+      >
         {lines.length ? (
-          <div className="mx-auto max-w-4xl space-y-5 text-center font-semibold leading-[1.65] tracking-normal">
-            {lines.map((line) => {
+          <div className={lyricStageClass()}>
+            {visibleLines().map((line) => {
               if (line.kind === "gap") {
                 return <div key={line.id} className="h-4" aria-hidden="true" />;
               }
 
               if (line.kind === "label") {
                 return (
-                  <p key={line.id} className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300/60">
+                  <p key={line.id} className="text-xs font-semibold uppercase tracking-widest text-teal-300/60">
                     {line.text}
                   </p>
                 );
@@ -628,30 +708,36 @@ export default function LyricsDisplay({ track, currentTime, onTrackUpdated }) {
               }
 
               return (
-                <p
-                  key={line.id}
-                  ref={isActiveLine ? activeRef : null}
-                  className={lyricLineClassName(isActiveLine, isComplete)}
-                >
-                  {line.words.map((word) => {
-                    const presentation = lyricWordPresentation(
-                      word,
-                      isActiveLine,
-                      lineJustActivatedRef.current,
-                    );
-                    return (
-                    <Fragment key={word.id}>
-                      <span
-                        className={presentation.className}
-                        style={presentation.style}
-                      >
-                        {word.text}
-                      </span>
-                      {" "}
-                    </Fragment>
-                    );
-                  })}
-                </p>
+                <div key={line.id} ref={isActiveLine ? activeRef : null} className="relative">
+                  <p className={lyricLineClassName(isActiveLine, isComplete)}>
+                    {line.words.map((word) => {
+                      const presentation = lyricWordPresentation(
+                        word,
+                        isActiveLine,
+                        lineJustActivatedRef.current,
+                      );
+                      return (
+                      <Fragment key={word.id}>
+                        <span
+                          className={presentation.className}
+                          style={presentation.style}
+                        >
+                          {word.text}
+                        </span>
+                        {" "}
+                      </Fragment>
+                      );
+                    })}
+                  </p>
+                  {isActiveLine && (
+                    <div className="mx-auto mt-2 h-0.5 max-w-56 overflow-hidden rounded-full bg-zinc-800">
+                      <div
+                        className="active-line-progress h-full rounded-full bg-amber-200"
+                        style={{ width: `${activeLineProgress(line)}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
